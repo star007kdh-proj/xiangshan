@@ -465,9 +465,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
   topdownStage.backendRedirectOverride(io.backendRedirectTopdown)
   io.toIfu.req.bits.topdownInfo := topdownStage
 
-  when(distanceBetween(bpuPtr(0), commitPtr(0)) < FtqSize.U) {
+  when(!(distanceBetween(bpuPtr(0), commitPtr(0)) < FtqSize.U)) {
     topdownStage.reasons(TopDownCounters.FtqFullStall.id) := true.B
-  }.elsewhen(distanceBetween(bpuPtr(0), ifuPtr(0)) < BpRunAheadDistance.U && bpTrainStallCnt < BpTrainStallLimit.U) {
+  }.elsewhen(!(distanceBetween(bpuPtr(0), ifuPtr(0)) < BpRunAheadDistance.U && bpTrainStallCnt < BpTrainStallLimit.U)) {
     topdownStage.reasons(TopDownCounters.FtqUpdateBubble.id) := true.B
   }
 
