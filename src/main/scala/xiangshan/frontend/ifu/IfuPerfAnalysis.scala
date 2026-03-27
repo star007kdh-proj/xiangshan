@@ -90,7 +90,7 @@ class IfuPerfAnalysis(implicit p: Parameters) extends IfuModule {
 
   private def numOfStage = 3
   require(numOfStage > 1, "Ifu numOfStage must be greater than 1")
-  private val topdownStages = RegInit(VecInit(Seq.fill(numOfStage)(0.U.asTypeOf(new FrontendTopDownBundle))))
+  private val topdownStages = RegInit(VecInit.fill(numOfStage)(0.U.asTypeOf(new FrontendTopDownBundle)))
   // bubble events in IFU, only happen in stage 1
   private val icacheMissBubble = icacheTopdown.iCacheMissBubble
   private val itlbMissBubble   = icacheTopdown.itlbMissBubble

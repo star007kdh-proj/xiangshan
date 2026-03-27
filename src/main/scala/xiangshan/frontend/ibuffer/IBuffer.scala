@@ -366,7 +366,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   // TopDown
   /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
   private def numStages     = 2
-  private val topdownStages = RegInit(VecInit(Seq.fill(numStages)(0.U.asTypeOf(new FrontendTopDownBundle))))
+  private val topdownStages = RegInit(VecInit.fill(numStages)(0.U.asTypeOf(new FrontendTopDownBundle)))
 
   topdownStages(0) := io.in.bits.topdownInfo
   for (i <- 1 until numStages) {
@@ -378,7 +378,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   private val deqValidCount = PopCount(io.out.map(_.valid))
   private val deqWasteCount = DecodeWidth.U - deqValidCount
   private val matchBubble = (TopDownCounters.NumStallReasons.id - 1).U - PriorityEncoder(
-    topdownStages(numStages - 1).reasons.reverse
+    topdownStages.last.reasons.reverse
   )
 
   io.stallReason.reason.foreach(_ := 0.U)
@@ -388,7 +388,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
     }
   }
 
-  when(!(deqWasteCount === DecodeWidth.U || topdownStages(numStages - 1).reasons.asUInt.orR)) {
+  when(!(deqWasteCount === DecodeWidth.U || topdownStages.last.reasons.asUInt.orR)) {
     // should set reason for FetchFragmentationStall
     // topdownStage.reasons(TopDownCounters.FetchFragmentationStall.id) := true.B
     for (i <- 0 until DecodeWidth) {
