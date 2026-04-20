@@ -288,7 +288,7 @@ class BpuResolveMeta(implicit p: Parameters) extends BpuBundle {
 
 class BpuPerfMeta(implicit p: Parameters) extends BpuBundle {
   val bpId:         UInt                = UInt(XLEN.W)
-  val scUsed:       UInt                = UInt(NumBtbResultEntries.W)
+  val scUsed:       UInt                = UInt(NumBtbPredEntries.W)
   val startPc:      PrunedAddr          = new PrunedAddr(VAddrBits)
   val s1Prediction: Prediction          = new Prediction
   val s3Prediction: Prediction          = new Prediction

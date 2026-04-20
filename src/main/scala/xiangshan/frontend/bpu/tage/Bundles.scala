@@ -70,12 +70,12 @@ class PhrToTageIO(implicit p: Parameters) extends TageBundle {
 }
 
 class MainBtbToTageIO(implicit p: Parameters) extends TageBundle {
-  val result:       Vec[Valid[Prediction]] = Input(Vec(NumBtbResultEntries, Valid(new Prediction)))
-  val s1_positions: Vec[UInt]              = Input(Vec(NumBtbResultEntries, UInt(CfiPositionWidth.W)))
+  val result:       Vec[Valid[Prediction]] = Input(Vec(NumBtbPredEntries, Valid(new Prediction)))
+  val s1_positions: Vec[UInt]              = Input(Vec(NumBtbPredEntries, UInt(CfiPositionWidth.W)))
 }
 
 class TageToScIO(implicit p: Parameters) extends TageBundle {
-  val providerTakenCtrVec: Vec[Valid[SaturateCounter]] = Output(Vec(NumBtbResultEntries, Valid(TakenCounter())))
+  val providerTakenCtrVec: Vec[Valid[SaturateCounter]] = Output(Vec(NumBtbPredEntries, Valid(TakenCounter())))
 }
 
 class TableReadReq(implicit p: Parameters, info: TageTableInfo) extends TageBundle {
@@ -116,7 +116,7 @@ class TageMetaEntry(implicit p: Parameters) extends TageBundle {
 }
 
 class TageMeta(implicit p: Parameters) extends TageBundle {
-  val entries: Vec[TageMetaEntry] = Vec(NumBtbResultEntries, new TageMetaEntry)
+  val entries: Vec[TageMetaEntry] = Vec(NumBtbPredEntries, new TageMetaEntry)
 }
 
 class TageFoldedHist(implicit p: Parameters, info: TageTableInfo) extends TageBundle {

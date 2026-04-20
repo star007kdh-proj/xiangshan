@@ -232,8 +232,11 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   ittage.io.s1_foldedPhr   := phr.io.s1_foldedPhr
   ittage.io.trainFoldedPhr := phr.io.trainFoldedPhr
 
-  sc.io.mbtbResult          := mbtb.io.result
-  sc.io.providerTakenCtrs   := tage.io.toSc.providerTakenCtrVec
+  // SC only sees SRAM entries (first NumBtbResultEntries); VC slots excluded
+  for (i <- 0 until NumBtbResultEntries) {
+    sc.io.mbtbResult(i)        := mbtb.io.result(i)
+    sc.io.providerTakenCtrs(i) := tage.io.toSc.providerTakenCtrVec(i)
+  }
   sc.io.foldedPathHist      := phr.io.s0_foldedPhr
   sc.io.imli                := commonHR.io.s0_imli
   sc.io.trainFoldedPathHist := phr.io.trainFoldedPhr
@@ -313,8 +316,15 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   /* *** s3 prediction selection *** */
   private val s3_mbtbResult     = RegEnable(mbtb.io.result, s2_fire)
   private val s3_tagePrediction = RegEnable(tage.io.prediction, s2_fire)
-  private val s3_scUsed         = RegEnable(sc.io.scUsed, s2_fire)
-  private val s3_scTakenMask    = RegEnable(sc.io.scTakenMask, s2_fire)
+  // Pad SC 8-wide outputs with false.B for VC slots (NumBtbResultEntries..NumBtbPredEntries-1)
+  private val s2_scUsedPadded = VecInit(
+    sc.io.scUsed.toSeq ++ Seq.fill(NumBtbPredEntries - NumBtbResultEntries)(false.B)
+  )
+  private val s2_scTakenPadded = VecInit(
+    sc.io.scTakenMask.toSeq ++ Seq.fill(NumBtbPredEntries - NumBtbResultEntries)(false.B)
+  )
+  private val s3_scUsed         = RegEnable(s2_scUsedPadded, s2_fire)
+  private val s3_scTakenMask    = RegEnable(s2_scTakenPadded, s2_fire)
 
   private val s3_takenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
     val tagePred = s3_tagePrediction(i)
@@ -693,7 +703,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val t0_mispredictBranch = train.mispredictBranch
   private val t0_mbtbMeta         = train.meta.mbtb
   private val t0_branches         = train.branches
-  private val t0_mbtbHit          = t0_mbtbMeta.entries.flatten.map(_.hit(t0_mispredictBranch.bits)).reduce(_ || _)
+  private val t0_mbtbHit          = t0_mbtbMeta.allMetaEntries.map(_.hit(t0_mispredictBranch.bits)).reduce(_ || _)
 
   XSPerfAccumulate(
     "train",

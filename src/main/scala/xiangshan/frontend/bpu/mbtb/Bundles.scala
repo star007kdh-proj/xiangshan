@@ -72,11 +72,58 @@ class MainBtbMetaEntry(implicit p: Parameters) extends MainBtbBundle {
   val attribute: BranchAttribute = new BranchAttribute
   val counter:   SaturateCounter = TakenCounter()
 
+  // VC: SRAM snapshot fields needed to reconstruct evicted entries at T1 (Path C)
+  val sramValid:       Option[Bool]        = Option.when(HasVC)(Bool())
+  val sramTag:         Option[UInt]        = Option.when(HasVC)(UInt(TagWidth.W))
+  val targetLowerBits: Option[UInt]        = Option.when(HasVC)(UInt(TargetWidth.W))
+  val targetCarry:     Option[TargetCarry] = Option.when(HasVC)(new TargetCarry)
+
   def hit(branch: BranchInfo): Bool = rawHit && position === branch.cfiPosition
+}
+
+// VC entry stored in the victim cache register file
+class VCEntry(implicit p: Parameters) extends MainBtbBundle {
+  val valid:           Bool            = Bool()
+  val vcTag:           UInt            = UInt(VCTagWidth.W)
+  val position:        UInt            = UInt(CfiAlignedPositionWidth.W)
+  val attribute:       BranchAttribute = new BranchAttribute
+  val targetCarry:     TargetCarry     = new TargetCarry
+  val targetLowerBits: UInt            = UInt(TargetWidth.W)
+  val counter:         SaturateCounter = TakenCounter()
+}
+
+// Per-AlignBank VC meta stored in FTQ (minimal)
+class VCMetaEntry(implicit p: Parameters) extends MainBtbBundle {
+  val hit:   Bool = Bool()
+  val vcIdx: UInt = UInt(VCIdxLen.W)
+}
+
+// Per-AlignBank VC prediction info, internal to MainBtb (piped S2 -> S3)
+// NOTE: Legacy type, retained for compilation but no longer used in the merge path.
+class VCAlignBankPredInfo(implicit p: Parameters) extends MainBtbBundle {
+  val hit:       Bool = Bool()
+  val vcIdx:     UInt = UInt(VCIdxLen.W)
+  val mergedWay: UInt = UInt(log2Ceil(NumWay).W)
+}
+
+// Per-VC-result-slot info, internal to MainBtb (piped S1 -> S2 -> S3)
+class VCResultSlotInfo(implicit p: Parameters) extends MainBtbBundle {
+  val hit:             Bool = Bool()
+  val vcIdx:           UInt = UInt(VCIdxLen.W)
+  val posHigherBits:   UInt = UInt(AlignBankIdxLen.W)
+  val sourceAlignBank: UInt = UInt(AlignBankIdxLen.W)
 }
 
 class MainBtbMeta(implicit p: Parameters) extends MainBtbBundle {
   val entries: Vec[Vec[MainBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MainBtbMetaEntry))
+  val vc: Option[Vec[VCMetaEntry]] = Option.when(HasVC)(Vec(NumVCResultSlots, new VCMetaEntry))
+  // VC slot metas in MainBtbMetaEntry form (for SC/TAGE training compatibility)
+  val vcSlotMetas: Option[Vec[MainBtbMetaEntry]] =
+    Option.when(HasVC)(Vec(NumVCResultSlots, new MainBtbMetaEntry))
+
+  // SRAM + VC slot metas as a single flat Seq (for indexing by NumBtbResultEntries)
+  def allMetaEntries: Seq[MainBtbMetaEntry] =
+    vcSlotMetas.map(vc => entries.flatten ++ vc).getOrElse(entries.flatten)
 }
 
 class MainBtbAlignBankTrace(implicit p: Parameters) extends MainBtbBundle {

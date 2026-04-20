@@ -75,6 +75,11 @@ class MainBtbAlignBank(
 
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumWay, Bool()))
+
+    // VC support
+    val s1_rawValidBits:       Option[Vec[Bool]] = Option.when(HasVC)(Output(Vec(NumWay, Bool())))
+    val vcSuppressWrite:       Option[Bool]      = Option.when(HasVC)(Input(Bool()))
+    val replacerVictimWayMask: Option[UInt]      = Option.when(HasVC)(Output(UInt(NumWay.W)))
   }
 
   val io: MainBtbAlignBankIO = IO(new MainBtbAlignBankIO)
@@ -133,6 +138,9 @@ class MainBtbAlignBank(
 
   io.read.s1_positions := VecInit(s1_rawEntries.map(e => Cat(s1_posHigherBits, e.position)))
 
+  // VC: expose raw SRAM valid bits at S1 so MainBtb can identify empty slots for VC position override
+  io.s1_rawValidBits.foreach(_ := VecInit(s1_rawEntries.map(_.valid)))
+
   /* *** s2 ***
    * check entries hit
    * filter-out unneeded entries
@@ -172,6 +180,12 @@ class MainBtbAlignBank(
     meta.attribute := e.attribute
     meta.position  := Cat(s2_posHigherBits, e.position)
     meta.counter   := c
+
+    // VC: SRAM snapshot for reconstructing evicted entries at T1
+    meta.sramValid.foreach(_ := e.valid)
+    meta.sramTag.foreach(_ := e.tag)
+    meta.targetLowerBits.foreach(_ := e.targetLowerBits)
+    meta.targetCarry.foreach(_ := e.targetCarry)
   }
 
   // add an alias for hitMask for later use & debug purpose
@@ -210,7 +224,7 @@ class MainBtbAlignBank(
   private val t1_hit     = t1_hitMask.orR
 
   // Write entry only when there's a mispredict, and if:
-  private val t1_entryNeedWrite = t1_needWrite && t1_mispredictInfo.valid && (
+  private val t1_entryNeedWriteRaw = t1_needWrite && t1_mispredictInfo.valid && (
     // 1. not hit, always write a new entry, use mbtb replacer's victim way.
     !t1_hit ||
       // 2. hit, do write only if:
@@ -219,6 +233,8 @@ class MainBtbAlignBank(
       //   b. attribute changed, probably indicating a software self-modification.
       !(t1_mispredictInfo.bits.attribute === Mux1H(t1_hitMask, t1_meta.map(_.attribute)))
   )
+  // VC Path B: suppress SRAM write when MainBtb handles the update in VC instead
+  private val t1_entryNeedWrite = t1_entryNeedWriteRaw && !io.vcSuppressWrite.getOrElse(false.B)
   // Use hit wayMask if hit, else use replacer's victim way
   private val t1_entryWayMask = Mux(t1_hit, t1_hitMask, replacer.io.victim.wayMask)
 
@@ -244,6 +260,9 @@ class MainBtbAlignBank(
   replacer.io.trainTouch.valid        := t1_fire && t1_entryNeedWrite
   replacer.io.trainTouch.bits.setIdx  := getReplacerSetIndex(t1_startPc)
   replacer.io.trainTouch.bits.wayMask := t1_entryWayMask
+
+  // VC Path C: expose the replacer's victim way mask for eviction capture
+  io.replacerVictimWayMask.foreach(_ := replacer.io.victim.wayMask)
 
   /* *** update counter *** */
   private val t1_newCounters    = Wire(Vec(NumWay, TakenCounter()))

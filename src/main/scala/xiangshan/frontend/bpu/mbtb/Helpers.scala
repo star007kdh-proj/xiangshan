@@ -68,6 +68,10 @@ trait Helpers extends HasMainBtbParameters
   def getTag(pc: PrunedAddr): UInt =
     addrFields.extract("tag", pc)
 
+  // Construct a fully-qualified VC tag from a per-AlignBank startPc
+  def makeVCTag(pc: PrunedAddr): UInt =
+    Cat(getTag(pc), getSetIndex(pc), getInternalBankIndex(pc), getAlignBankIndex(pc))
+
   // detect multi-hit, return a mask indicating which way has multi-hit
   def detectMultiHit(hitMask: IndexedSeq[Bool], position: IndexedSeq[UInt]): UInt = {
     require(hitMask.length == position.length)

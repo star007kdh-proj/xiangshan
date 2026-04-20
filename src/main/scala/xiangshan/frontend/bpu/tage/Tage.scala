@@ -36,7 +36,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     val fromPhr:     PhrToTageIO         = new PhrToTageIO
     val fromMainBtb: MainBtbToTageIO     = new MainBtbToTageIO
     val toSc:        TageToScIO          = new TageToScIO
-    val prediction:  Vec[TagePrediction] = Output(Vec(NumBtbResultEntries, new TagePrediction))
+    val prediction:  Vec[TagePrediction] = Output(Vec(NumBtbPredEntries, new TagePrediction))
     val meta:        TageMeta            = Output(new TageMeta)
 
     val debug_trainValid: Bool = Input(Bool())
@@ -189,7 +189,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val t0_fire = io.stageCtrl.t0_fire && t0_hasCond && io.enable
 
   private val (t0_mbtbHitMask, t0_basePred, t0_meta) = t0_branches.map { branch =>
-    val mbtbMeta  = io.train.meta.mbtb.entries.flatten
+    val mbtbMeta  = io.train.meta.mbtb.allMetaEntries
     val tageMeta  = io.train.meta.tage.entries
     val hitMask   = mbtbMeta.map(_.hit(branch.bits))
     val hitMaskOH = PriorityEncoderOH(hitMask)

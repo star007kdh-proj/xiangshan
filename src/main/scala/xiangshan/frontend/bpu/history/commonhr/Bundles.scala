@@ -34,8 +34,8 @@ class CommonHREntry(implicit p: Parameters) extends CommonHRBundle {
 class CommonHRUpdate(implicit p: Parameters) extends CommonHRBundle {
   val taken:            Bool              = Bool()
   val s3Override:       Bool              = Bool()
-  val condHitMask:      Vec[Bool]         = Vec(NumBtbResultEntries, Bool())
-  val position:         Vec[UInt]         = Vec(NumBtbResultEntries, UInt(CfiPositionWidth.W))
+  val condHitMask:      Vec[Bool]         = Vec(NumBtbPredEntries, Bool())
+  val position:         Vec[UInt]         = Vec(NumBtbPredEntries, UInt(CfiPositionWidth.W))
   val firstTakenBranch: Valid[Prediction] = Valid(new Prediction)
   val startPc:          PrunedAddr        = PrunedAddr(VAddrBits)
   val target:           PrunedAddr        = PrunedAddr(VAddrBits)
@@ -52,9 +52,9 @@ class CommonHRMeta(implicit p: Parameters) extends CommonHRBundle {
   val ghr:       UInt                 = UInt(GhrHistoryLength.W)
   val bw:        UInt                 = UInt(BWHistoryLength.W)
   val imli:      UInt                 = UInt(ImliWidth.W)
-  val hitMask:   Vec[Bool]            = Vec(NumBtbResultEntries, Bool())
-  val attribute: Vec[BranchAttribute] = Vec(NumBtbResultEntries, new BranchAttribute)
-  val position:  Vec[UInt]            = Vec(NumBtbResultEntries, UInt(CfiPositionWidth.W))
+  val hitMask:   Vec[Bool]            = Vec(NumBtbPredEntries, Bool())
+  val attribute: Vec[BranchAttribute] = Vec(NumBtbPredEntries, new BranchAttribute)
+  val position:  Vec[UInt]            = Vec(NumBtbPredEntries, UInt(CfiPositionWidth.W))
 }
 
 class CommonHRRedirect(implicit p: Parameters) extends CommonHRBundle {

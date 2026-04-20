@@ -67,7 +67,12 @@ trait HasBpuParameters extends HasFrontendParameters {
 
   def NumBtbResultEntries: Int = bpuParameters.mbtbParameters.NumWay * bpuParameters.mbtbParameters.NumAlignBanks
 
-  def GhrShamt:         Int = NumBtbResultEntries
+  def NumBtbPredEntries: Int = {
+    val mbtb = bpuParameters.mbtbParameters
+    NumBtbResultEntries + (if (mbtb.VCSize > 0) mbtb.NumAlignBanks else 0)
+  }
+
+  def GhrShamt:         Int = NumBtbPredEntries
   def GhrHistoryLength: Int = bpuParameters.scParameters.GlobalTableInfos.map(_.HistoryLength).max
   def BWHistoryLength:  Int = bpuParameters.scParameters.BackwardTableInfos.map(_.HistoryLength).max
 
