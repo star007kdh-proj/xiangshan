@@ -20,9 +20,9 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.CircularQueuePtr
 import utility.HasCircularQueuePtrHelper
+import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
-import utils.EnumUInt
 import xiangshan.frontend.ftq.BpuFlushInfo
 import xiangshan.frontend.ftq.FtqPtr
 
@@ -31,11 +31,14 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     with HasCircularQueuePtrHelper {
 
   class ICacheWayLookupIO(implicit p: Parameters) extends ICacheBundle {
-    val flush:        Bool                              = Input(Bool())
-    val flushFromBpu: BpuFlushInfo                      = Input(new BpuFlushInfo)
-    val read:         DecoupledIO[WayLookupBundle]      = DecoupledIO(new WayLookupBundle)
-    val write:        DecoupledIO[WayLookupWriteBundle] = Flipped(DecoupledIO(new WayLookupWriteBundle))
-    val update:       Valid[MissRespBundle]             = Flipped(ValidIO(new MissRespBundle))
+    val flush:        Bool         = Input(Bool())
+    val flushFromBpu: BpuFlushInfo = Input(new BpuFlushInfo)
+
+    val read: DecoupledIO[WayLookupBundle] = DecoupledIO(new WayLookupBundle)
+
+    val write: Vec[DecoupledIO[WayLookupWriteBundle]] = Vec(FetchPorts, Flipped(DecoupledIO(new WayLookupWriteBundle)))
+
+    val update: Valid[MissRespBundle] = Flipped(ValidIO(new MissRespBundle))
 
     val perf: WayLookupPerfInfo = Output(new WayLookupPerfInfo)
   }
@@ -59,12 +62,18 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   private val tailFtqIdx = RegInit(0.U.asTypeOf(new FtqPtr))
 
   private val empty = readPtr === writePtr
-  private val full  = (readPtr.value === writePtr.value) && (readPtr.flag ^ writePtr.flag)
+
+  private val numValidEntries = distanceBetween(writePtr, readPtr)
+  private val numFreeEntries  = WayLookupSize.U - numValidEntries
+  dontTouch(numValidEntries)
+  dontTouch(numFreeEntries)
 
   // NOTE: May be unportable, we have bp3 == pf2 now, and WayLookup is written in pf1,
   // so the tailing 0 (already bypassed to if1) or 1 (if1 stall, stored here) entries might be flushed by bp3,
   // therefore, when shouldFlushByStage3, we need to move back writePtr by 0 (empty) or 1.
   // If in future we have bp4 (or even more) flush, this might not be enough.
+  // NOTE: With 2-prefetch, writePtr - 2.U still does not need to be flushed,
+  // as we ask the second fetch block to be flushed within Ftq. Refer to `canTwoPrefetch` condition in `class Ftq`
   private val bpuS3FlushValid = io.flushFromBpu.shouldFlushByStage3(tailFtqIdx, true.B)
   private val bpuS3FlushPtr   = writePtr - 1.U
 
@@ -73,8 +82,10 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     writePtr.flag  := false.B
   }.elsewhen(bpuS3FlushValid && !empty) {
     writePtr := bpuS3FlushPtr
-  }.elsewhen(io.write.fire) {
-    writePtr := writePtr + 1.U
+  }.elsewhen(io.write.head.fire) {
+    // FetchPorts must be 1 or 2, and last.fire is depend on head.fire
+    val enqCnt = Mux(io.write.last.fire, FetchPorts.U, 1.U)
+    writePtr := writePtr + enqCnt
   }
 
   when(io.flush) {
@@ -87,8 +98,8 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   when(io.flush) {
     tailFtqIdx.value := 0.U
     tailFtqIdx.flag  := false.B
-  }.elsewhen(io.write.fire) {
-    tailFtqIdx := io.write.bits.ftqIdx
+  }.elsewhen(io.write.head.fire) {
+    tailFtqIdx := Mux(io.write.last.fire, io.write.last.bits.ftqIdx, io.write.head.bits.ftqIdx)
   }
 
   // we can store only the first exception encountered, as exceptions must trigger a redirection (and thus a flush)
@@ -122,11 +133,11 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
 
   /* *** read *** */
   // if the entry is empty, but there is a valid write, we can bypass it to read port (maybe timing critical)
-  private val canBypass = empty && io.write.valid && !exceptionEntry.valid
+  private val canBypass = empty && io.write.head.valid && !exceptionEntry.valid
   private val canRead   = !empty && !updateStall
   io.read.valid := canRead || canBypass
   when(canBypass) {
-    io.read.bits := io.write.bits
+    io.read.bits := io.write.head.bits
   }.otherwise {
     io.read.bits.entry          := entries(readPtr.value)
     io.read.bits.exceptionEntry := Mux(exceptionHit, exceptionEntry.bits, 0.U.asTypeOf(new WayLookupExceptionEntry))
@@ -139,15 +150,24 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     */
   // stall write if there is an exceptions to save power (i.e. wait for flush)
   // this will stall the prefetch pipe
-  io.write.ready := !full && !exceptionEntry.valid
-  when(io.write.fire) {
-    entries(writePtr.value) := io.write.bits.entry
-    when(io.write.bits.itlbException.hasException) {
+  // also we disallow only 1 ready, to simplify PrefetchPipe
+  io.write.foreach(_.ready := numFreeEntries >= FetchPorts.U && !exceptionEntry.valid)
+  when(io.write.head.fire) {
+    entries(writePtr.value) := io.write.head.bits.entry
+    if (FetchPorts > 1) {
+      when(io.write.last.fire) {
+        entries(writePtr.value + 1.U) := io.write.last.bits.entry
+      }
+    }
+    // ftq/prefetchPipe ensure fetch blocks has the same exception, here we can consider only .head
+    when(io.write.head.bits.itlbException.hasException) {
       exceptionEntry.valid := true.B
-      exceptionEntry.bits  := io.write.bits.exceptionEntry
+      exceptionEntry.bits  := io.write.head.bits.exceptionEntry
       exceptionPtr         := writePtr
     }
   }
+  // the second port (if FetchPorts == 2) must fire together with the first port
+  XSError(io.write.last.fire && !io.write.head.fire, "2-prefetch port fire without first port fire")
 
   /* *** perf *** */
   // tell ICache top if queue is empty
@@ -162,8 +182,8 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     0,
     WayLookupSize
   )
-  XSPerfAccumulate("emptyHasBypass", empty && io.write.valid)
-  XSPerfAccumulate("emptyNoBypass", empty && !io.write.valid)
+  XSPerfAccumulate("emptyHasBypass", empty && io.write.head.valid)
+  XSPerfAccumulate("emptyNoBypass", empty && !io.write.head.valid)
   // exception stall cycles
   XSPerfAccumulate("waitingForExceptionRead", exceptionEntry.valid && !empty)
   XSPerfAccumulate("waitingForExceptionFlush", exceptionEntry.valid && empty)
