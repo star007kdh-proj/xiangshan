@@ -58,6 +58,7 @@ case class FrontendParameters(
 
   // sanity check
   require(isPow2(FetchBlockSize))
+  require(FetchPorts == 1 || FetchPorts == 2, "Only 1 or 2-fetch is supported")
 }
 
 trait HasFrontendParameters extends HasXSParameter {
@@ -87,4 +88,9 @@ trait HasFrontendParameters extends HasXSParameter {
   def IBufferEnqueueWidth: Int = FetchBlockInstNum + frontendParameters.ibufferParameters.NumWriteBank
 
   def ResolveEntryBranchNumber: Int = frontendParameters.ResolveEntryBranchNumber
+
+  def MaxPrefetchReqNum: Int = 2
+  def MaxFetchReqNum:    Int = 2
+  def MaxAccessLineNum:  Int = 2
+  def MaxFetchLineNum:   Int = MaxFetchReqNum * MaxAccessLineNum
 }
