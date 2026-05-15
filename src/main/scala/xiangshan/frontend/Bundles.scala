@@ -161,14 +161,7 @@ class FrontendRedirect(implicit p: Parameters) extends FrontendBundle {
 }
 
 class IfuToFtqIO(implicit p: Parameters) extends FrontendBundle {
-  val mmioCommitRead: MmioCommitRead          = new MmioCommitRead
-  val wbRedirect:     Valid[FrontendRedirect] = Valid(new FrontendRedirect)
-}
-
-class MmioCommitRead(implicit p: Parameters) extends FrontendBundle {
-  val valid:          Bool   = Output(Bool())
-  val mmioFtqPtr:     FtqPtr = Output(new FtqPtr)
-  val mmioLastCommit: Bool   = Input(Bool())
+  val wbRedirect: Valid[FrontendRedirect] = Valid(new FrontendRedirect)
 }
 
 class ExceptionType extends Bundle {

@@ -67,10 +67,12 @@ class Ifu(implicit p: Parameters) extends IfuModule
     val fromUncache: InstrUncacheToIfuIO = Flipped(new InstrUncacheToIfuIO)
 
     // IBuffer: enqueue
-    val toIBuffer: DecoupledIO[FetchToIBuffer] = DecoupledIO(new FetchToIBuffer)
+    val toIBuffer:    DecoupledIO[FetchToIBuffer] = DecoupledIO(new FetchToIBuffer)
+    val ibufferEmpty: Bool                        = Input(Bool())
 
     // Backend: gpaMem
-    val toBackend: IfuToBackendIO = new IfuToBackendIO
+    val toBackend:    IfuToBackendIO = new IfuToBackendIO
+    val backendEmpty: Bool           = Input(Bool())
 
     // debug extension: frontend trigger
     val frontendTrigger: FrontendTdataDistributeIO = Flipped(new FrontendTdataDistributeIO)
@@ -542,14 +544,13 @@ class Ifu(implicit p: Parameters) extends IfuModule
   }
 
   uncacheUnit.io.req.valid       := s3_valid && s3_useUncacheFetch && !uncacheBusy
-  uncacheUnit.io.req.bits.ftqIdx := s3_alignFetchBlock(0).ftqIdx
   uncacheUnit.io.req.bits.pbmt   := s3_icacheMeta(0).itlbPbmt
   uncacheUnit.io.req.bits.isMmio := s3_icacheMeta(0).pmpMmio
   uncacheUnit.io.req.bits.paddr  := s3_icacheMeta(0).pAddr
   uncacheUnit.io.flush           := s3_flush
   uncacheUnit.io.isFirstInstr    := isFirstInstr
   uncacheUnit.io.ifuStall        := !io.toIBuffer.ready
-  io.toFtq.mmioCommitRead <> uncacheUnit.io.mmioCommitRead
+  uncacheUnit.io.emptyAfter      := io.backendEmpty && io.ibufferEmpty
   io.toUncache <> uncacheUnit.io.toUncache
   uncacheUnit.io.fromUncache <> io.fromUncache
 
