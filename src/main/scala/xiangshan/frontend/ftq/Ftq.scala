@@ -125,10 +125,21 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // perfQueue stores information for performance monitoring. These queues should not exist in hardware
   private val perfQueue = Reg(Vec(FtqSize, new PerfMeta))
 
-  private val specTopAddr = metaQueueRedirect(io.fromIfu.wbRedirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
-  private val ifuRedirect = receiveIfuRedirect(io.fromIfu.wbRedirect, specTopAddr)
+  private val (backendRedirectFtqIdxInAdvance, backendRedirect) = receiveBackendRedirect(io.fromBackend)
 
-  private val (backendRedirectFtqIdx, backendRedirect) = receiveBackendRedirect(io.fromBackend)
+  private val specTopAddr = metaQueueRedirect(io.fromIfu.wbRedirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
+  private val (ifuRedirectFtqIdxInAdvance, ifuRedirect) = receiveIfuRedirect(
+    io.fromIfu.wbRedirect,
+    specTopAddr,
+    backendRedirect.valid
+  )
+
+  // redirectFtqIdxInAdvance is always one cycle ahead of redirect
+  private val redirectFtqIdxInAdvance = Mux(
+    backendRedirectFtqIdxInAdvance.valid,
+    backendRedirectFtqIdxInAdvance.bits,
+    ifuRedirectFtqIdxInAdvance.bits
+  )
 
   private val redirect = Mux(backendRedirect.valid, backendRedirect, ifuRedirect)
 
@@ -406,7 +417,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.redirect.bits.target    := redirect.bits.target
   io.toBpu.redirect.bits.taken     := redirect.bits.taken
   io.toBpu.redirect.bits.attribute := redirect.bits.attribute
-  io.toBpu.redirect.bits.meta      := metaQueueRedirect(redirect.bits.ftqIdx.value)
+  io.toBpu.redirect.bits.meta      := RegNext(metaQueueRedirect(redirectFtqIdxInAdvance.value))
   io.toBpu.redirectFromIFU         := ifuRedirect.valid
 
   // pair-second mispred markers: prior slot is pair-first; carry its startPc for uBTB demote.
@@ -544,7 +555,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     PrunedAddrInit(redirect.bits.pc),
     redirect.bits.ftqOffset
   )._1
-  private val redirectPerfMeta = perfQueue(backendRedirectFtqIdx.bits.value).bpuPerf
+  private val redirectPerfMeta = perfQueue(backendRedirect.bits.ftqIdx.value).bpuPerf
   private val commitPerfMeta   = perfQueue(commitPtr(0).value)
 
   XSPerfPriorityAccumulate(
