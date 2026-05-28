@@ -52,6 +52,7 @@ import xiangshan.frontend.bpu.BpuCommitMeta
 import xiangshan.frontend.bpu.BpuPredictionSource
 import xiangshan.frontend.bpu.BpuRedirectMeta
 import xiangshan.frontend.bpu.BpuResolveMeta
+import xiangshan.frontend.bpu.BpuTrain
 import xiangshan.frontend.bpu.HalfAlignHelper
 import xiangshan.frontend.icache.ICacheCacheLineHelper
 import xiangshan.frontend.icache.ICacheToFtqIO
@@ -438,19 +439,38 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   resolveQueue.io.backendResolve := io.fromBackend.resolve
 
-  // suppress resolve training for pair second slots (stale meta); ready unchanged so it still dequeues.
-  private val trainFtqIdx     = resolveQueue.io.bpuTrain.bits.ftqIdx.value
-  private val trainIsPairSecond =
-    if (EnableTwoTaken) isPairSecond(trainFtqIdx) else false.B
-  io.toBpu.train.valid           := resolveQueue.io.bpuTrain.valid && !trainIsPairSecond
-  resolveQueue.io.bpuTrain.ready := io.toBpu.train.ready
-  io.toBpu.train.bits.meta       := metaQueueResolve(trainFtqIdx)
-  io.toBpu.train.bits.startPc    := resolveQueue.io.bpuTrain.bits.startPc
-  io.toBpu.train.bits.branches   := resolveQueue.io.bpuTrain.bits.branches
-  io.toBpu.train.bits.perfMeta   := perfQueue(trainFtqIdx).bpuPerf
-  if (EnableTwoTaken) {
-    XSPerfAccumulate("pairSecondTrainSuppressed", resolveQueue.io.bpuTrain.valid && trainIsPairSecond)
+  private val trainCache      = RegInit(0.U.asTypeOf(Valid(new BpuTrain)))
+  private val trainIndexCache = RegInit(0.U.asTypeOf(new FtqPtr))
+
+  // suppress resolve training for pair second slots (stale meta): the cached entry is dropped like a
+  // consumed one (no BPU train produced), so the resolve queue still dequeues it. Composes the 2-taken
+  // pair-second suppression with the registered train cache + redirect flush from 7be11a171.
+  private val cachedIsPairSecond =
+    if (EnableTwoTaken) isPairSecond(trainIndexCache.value) else false.B
+
+  resolveQueue.io.bpuTrain.ready := !trainCache.valid || io.toBpu.train.fire || cachedIsPairSecond
+
+  private val flushTrain = backendRedirect.valid && trainIndexCache > backendRedirect.bits.ftqIdx
+
+  when(flushTrain) {
+    trainCache.valid := false.B
+  }.elsewhen(resolveQueue.io.bpuTrain.fire) {
+    trainCache.bits.meta     := metaQueueResolve(resolveQueue.io.bpuTrain.bits.ftqIdx.value)
+    trainCache.bits.startPc  := resolveQueue.io.bpuTrain.bits.startPc
+    trainCache.bits.branches := resolveQueue.io.bpuTrain.bits.branches
+    trainCache.bits.perfMeta := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
+    trainCache.valid         := true.B
+    trainIndexCache          := resolveQueue.io.bpuTrain.bits.ftqIdx
+  }.elsewhen(io.toBpu.train.fire || cachedIsPairSecond) {
+    trainCache.valid := false.B
   }
+
+  io.toBpu.train.valid := trainCache.valid && !flushTrain && !cachedIsPairSecond
+  io.toBpu.train.bits  := trainCache.bits
+  if (EnableTwoTaken) {
+    XSPerfAccumulate("pairSecondTrainSuppressed", trainCache.valid && cachedIsPairSecond)
+  }
+
 
   io.fromBackend.resolve.foreach { branch =>
     val ftqIdx      = branch.bits.ftqIdx.value
