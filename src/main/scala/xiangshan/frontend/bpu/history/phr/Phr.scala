@@ -96,6 +96,10 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   redirectData.cfiPc   := io.train.redirect.bits.cfiPc
   redirectData.target  := io.train.redirect.bits.target
   redirectData.phrMeta := io.train.redirect.bits.meta.phr
+  // Backend redirect resolves a single FTQ entry; pair-second branch is not
+  // re-shifted here. The meta itself encodes the correct phrPtr (first-slot
+  // pre-update view or second-slot post-first-update view).
+  redirectData.pairSecond.foreach(_ := 0.U.asTypeOf(new PhrPairSecond))
 
   s3_override               := io.train.s3_override
   s3_overrideData.valid     := s3_override
@@ -104,6 +108,8 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   s3_overrideData.target    := io.train.s3_prediction.target
   s3_overrideData.phrMeta   := io.train.s3_phrMeta
   s3_overrideData.foldedPhr := s3_foldedPhrReg
+  // s3 override always produces a single-entry prediction, never a pair.
+  s3_overrideData.pairSecond.foreach(_ := 0.U.asTypeOf(new PhrPairSecond))
 
   s1_overrideData.valid              := s1_valid
   s1_overrideData.taken              := io.train.s1_prediction.taken
@@ -112,6 +118,12 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   s1_overrideData.foldedPhr          := s1_foldedPhrReg
   s1_overrideData.phrMeta.phrPtr     := s1_phrPtr
   s1_overrideData.phrMeta.phrLowBits := s1_phrValue(PathHashHighWidth - 1, 0)
+  s1_overrideData.phrMeta.secondPhrPtr.foreach(_ := s1_phrPtr - Shamt.U)
+  s1_overrideData.phrMeta.secondPhrLowBits.foreach(_ := s1_phrValue(PathHashHighWidth - 1, 0))
+  // Pair second from BPU s1 path (if EnableTwoTaken).
+  if (EnableTwoTaken) {
+    s1_overrideData.pairSecond.get := io.train.s1_pairSecond.get
+  }
 
   updateData := MuxCase(
     0.U.asTypeOf(new PhrUpdateData),
@@ -126,11 +138,28 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   updateTarget := updateData.target
 
   /*
-   * phr := (phr<<Shamt) ^ hash
+   * Single-update path: phr := (phr << Shamt) ^ hash
+   *
+   * Pair-update path (EnableTwoTaken only): in one cycle, the spec-time PHR
+   * additionally shifts in the second branch's hash (B's hash in lower Shamt
+   * bits, C's hash in upper Shamt bits). The PHR pointer advances by 2*Shamt.
+   * First-entry meta stores phrPtr (pre-pair-fire); second-entry meta stores
+   * (phrPtr - Shamt), i.e. post-first-update — see io.phrMeta below.
    */
   private val hash      = pathHash(updateCfiPc, updateTarget)
   private val shiftBits = hash(Shamt - 1, 0)
   private val hashHigh  = hash(PathHashWidth - 1, Shamt)
+
+  // Pair-second hash & valid (EnableTwoTaken only)
+  private val pairValid =
+    if (EnableTwoTaken) updateData.pairSecond.get.valid && updateData.taken else false.B
+  private val pairCfiPc  = if (EnableTwoTaken) updateData.pairSecond.get.cfiPc
+                           else 0.U.asTypeOf(PrunedAddr(VAddrBits))
+  private val pairTarget = if (EnableTwoTaken) updateData.pairSecond.get.target
+                           else 0.U.asTypeOf(PrunedAddr(VAddrBits))
+  private val hash2      = if (EnableTwoTaken) pathHash(pairCfiPc, pairTarget) else 0.U(PathHashWidth.W)
+  private val shiftBits2 = if (EnableTwoTaken) hash2(Shamt - 1, 0) else 0.U(Shamt.W)
+  private val hashHigh2  = if (EnableTwoTaken) hash2(PathHashWidth - 1, Shamt) else 0.U((PathHashWidth - Shamt).W)
 
   when(updateData.valid) {
     phrPtr    := updateData.phrMeta.phrPtr
@@ -139,14 +168,24 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
       phr((updateData.phrMeta.phrPtr + i.U).value) := updateData.phrMeta.phrLowBits(i - 1)
     }
     when(updateData.taken) {
+      // Stage 1: shift in first branch's hash (Shamt bits)
       for (i <- 0 until Shamt) {
         phr((updateData.phrMeta.phrPtr - i.U).value) := shiftBits(Shamt - 1 - i)
       }
       for (i <- 1 to PathHashHighWidth) {
         phr((updateData.phrMeta.phrPtr + i.U).value) := hashHigh(i - 1) ^ updateData.phrMeta.phrLowBits(i - 1)
       }
-      phrPtr    := updateData.phrMeta.phrPtr - Shamt.U
-      s0_phrPtr := updateData.phrMeta.phrPtr - Shamt.U
+      // Stage 2 (pair only): shift in second branch's hash (next Shamt bits)
+      if (EnableTwoTaken) {
+        when(pairValid) {
+          for (i <- 0 until Shamt) {
+            phr((updateData.phrMeta.phrPtr - (Shamt + i).U).value) := shiftBits2(Shamt - 1 - i)
+          }
+        }
+      }
+      val advance = if (EnableTwoTaken) Mux(pairValid, (2 * Shamt).U, Shamt.U) else Shamt.U
+      phrPtr    := updateData.phrMeta.phrPtr - advance
+      s0_phrPtr := updateData.phrMeta.phrPtr - advance
     }
   }.otherwise {
     s0_phrPtr := phrPtr
@@ -222,6 +261,19 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   io.phrMeta.phrPtr     := s1_phrPtr
   io.phrMeta.phrLowBits := s1_phrValue(PathHashHighWidth - 1, 0)
   io.phrMeta.predFoldedHist.foreach(_ := s1_foldedPhrReg)
+  // Pair-second meta view: snapshot taken AFTER the first branch's hash has
+  // been shifted in (so phrPtr advanced by Shamt). FTQ writes this view into
+  // the second slot's metaQueueRedirect on pair enqueue, enabling a
+  // self-contained recovery if a backend redirect targets the second slot.
+  io.phrMeta.secondPhrPtr.foreach { p =>
+    p := s1_phrPtr - Shamt.U
+  }
+  io.phrMeta.secondPhrLowBits.foreach { p =>
+    // The phrLowBits region [phrPtr+1 .. phrPtr+PathHashHighWidth] is unchanged
+    // by a single Shamt-bit shift on the high side, so the second-slot view of
+    // phrLowBits matches the first-slot view here.
+    p := s1_phrValue(PathHashHighWidth - 1, 0)
+  }
   io.phr            := phr
   io.s0_foldedPhr   := s0_foldedPhr
   io.s1_foldedPhr   := s1_foldedPhrReg

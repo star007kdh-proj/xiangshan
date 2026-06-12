@@ -201,6 +201,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   abtb.io.redirectValid := redirect.valid
   abtb.io.overrideValid := s3_override
 
+  // uBTB pair demote on backend redirect targeting a pair-second FTQ slot.
+  ubtb.io.pairDemote.foreach { p =>
+    val isSecond = redirect.bits.isPairSecond.getOrElse(false.B)
+    p.valid := redirect.valid && isSecond
+    p.bits  := redirect.bits.pairFirstStartPc.getOrElse(0.U.asTypeOf(redirect.bits.cfiPc))
+  }
+
   utage.io.foldedPathHist         := phr.io.s0_foldedPhr
   utage.io.foldedPathHistForTrain := phr.io.trainFoldedPhr
   utage.io.abtbPrediction         := abtb.io.abtbResult
@@ -232,11 +239,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   ittage.io.s1_foldedPhr   := phr.io.s1_foldedPhr
   ittage.io.trainFoldedPhr := phr.io.trainFoldedPhr
 
-  // SC only sees SRAM entries (first NumBtbResultEntries); VC slots excluded
-  for (i <- 0 until NumBtbResultEntries) {
-    sc.io.mbtbResult(i)        := mbtb.io.result(i)
-    sc.io.providerTakenCtrs(i) := tage.io.toSc.providerTakenCtrVec(i)
-  }
+  // SC sees the full mbtb result vector (SRAM + VC slots). Per-branch correction is keyed by
+  // cfiPosition hash, so VC-hit branches share SC counter slots with SRAM-hit branches naturally.
+  sc.io.mbtbResult          := mbtb.io.result
+  sc.io.providerTakenCtrs   := tage.io.toSc.providerTakenCtrVec
   sc.io.foldedPathHist      := phr.io.s0_foldedPhr
   sc.io.imli                := commonHR.io.s0_imli
   sc.io.trainFoldedPathHist := phr.io.trainFoldedPhr
@@ -290,11 +296,45 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s1_abtbFirstTakenBr   = Mux1H(s1_abtbFirstTakenBrOH, s1_abtbPrediction)
   private val s1_abtbValid          = s1_abtbPrediction.map(_.valid).reduce(_ || _)
 
+  // uBTB pair output. Consumed when aBTB is invalid OR aBTB agrees with the
+  // pair's first branch (option B — see docs/ubtb_pair_plan.md §3.1).
+  // Suppressed for one cycle after each pair fire to mask the (A → D) chain
+  // mismatch in aBTB / uTAGE ahead pipelines.
+  private val s1_ubtbPair = if (EnableTwoTaken) ubtb.io.pairPrediction.get
+                            else 0.U.asTypeOf(Valid(new xiangshan.frontend.bpu.ubtb.MicroBtbPairOut))
+
   private val s1_abtbResult = Wire(new Prediction)
   s1_abtbResult       := s1_abtbFirstTakenBr.bits
   s1_abtbResult.taken := s1_abtbFirstTakenBrOH.reduce(_ || _)
+
+  // aBTB / uBTB-pair first agreement: same position + target + attribute.
+  // TODO(timing): the 4-way compare feeds s1_usePair which drives s0_startPc
+  // and the FTQ pair payload — check critical path on s1.
+  private val abtbUbtbAgree = if (EnableTwoTaken)
+    s1_abtbValid && s1_abtbResult.taken &&
+      (s1_abtbResult.cfiPosition === s1_ubtbPair.bits.first.cfiPosition) &&
+      (s1_abtbResult.target      === s1_ubtbPair.bits.first.target) &&
+      (s1_abtbResult.attribute   === s1_ubtbPair.bits.first.attribute)
+    else false.B
+
+  private val s1_usePair = if (EnableTwoTaken)
+    (!s1_abtbValid || abtbUbtbAgree) &&
+      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
+      (s1_ubtbPair.bits.confidence >= PairConfThreshold.U) &&       // emit gate by confidence
+      s1_ubtbPair.bits.first.taken &&
+      !s1_ubtbPair.bits.first.attribute.hasPush &&
+      !s1_ubtbPair.bits.first.attribute.hasPop &&
+      s1_ubtbPair.bits.second.attribute.isDirect &&
+      !s1_ubtbPair.bits.second.attribute.hasPush &&
+      !s1_ubtbPair.bits.second.attribute.hasPop
+    else false.B
+
+  // Will be assigned after s1_lastPairFire is declared (see io.toFtq.prediction below).
+  // Forward-declare here so subsequent Mux refers to it consistently.
+  private val s1_abtbValidEffective = Wire(Bool())
+
   s1_prediction := Mux(
-    s1_abtbValid,
+    s1_abtbValidEffective,
     Mux(s1_abtbResult.taken, s1_abtbResult, fallThrough.io.prediction),
     Mux(s1_ubtbPrediction.bits.taken, s1_ubtbPrediction.bits, fallThrough.io.prediction)
   )
@@ -305,7 +345,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   }
 
   private val s1_taken             = s1_prediction.taken
-  private val useAbtb              = s1_abtbValid && s1_abtbResult.taken
+  private val useAbtb              = s1_abtbValidEffective && s1_abtbResult.taken
   private val debug_s1UseUbtb      = s1_taken && !useAbtb
   private val debug_s1UseUbtbUtage = s1_taken && !useAbtb
   private val debug_s1UseAbtb      = s1_taken && useAbtb && !s1_utageHitMask.reduce(_ || _)
@@ -316,15 +356,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   /* *** s3 prediction selection *** */
   private val s3_mbtbResult     = RegEnable(mbtb.io.result, s2_fire)
   private val s3_tagePrediction = RegEnable(tage.io.prediction, s2_fire)
-  // Pad SC 8-wide outputs with false.B for VC slots (NumBtbResultEntries..NumBtbPredEntries-1)
-  private val s2_scUsedPadded = VecInit(
-    sc.io.scUsed.toSeq ++ Seq.fill(NumBtbPredEntries - NumBtbResultEntries)(false.B)
-  )
-  private val s2_scTakenPadded = VecInit(
-    sc.io.scTakenMask.toSeq ++ Seq.fill(NumBtbPredEntries - NumBtbResultEntries)(false.B)
-  )
-  private val s3_scUsed         = RegEnable(s2_scUsedPadded, s2_fire)
-  private val s3_scTakenMask    = RegEnable(s2_scTakenPadded, s2_fire)
+  private val s3_scUsed      = RegEnable(sc.io.scUsed, s2_fire)
+  private val s3_scTakenMask = RegEnable(sc.io.scTakenMask, s2_fire)
 
   private val s3_takenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
     val tagePred = s3_tagePrediction(i)
@@ -427,6 +460,41 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   }
   io.toFtq.prediction.bits.s3Override := s3_override
 
+  /* *** pair second payload (EnableTwoTaken only) ***
+   *
+   *  Pair fires only on the s1 path (not on s3 override). FTQ uses
+   *  `pair.valid` to drive `bpuPtr += 2` and to write the second slot's
+   *  `(startPc, takenCfiOffset)` from this payload (entryQueue's data layout
+   *  is unchanged — only the enqueue interface is widened to pairs).
+   */
+  io.toFtq.prediction.bits.pair.foreach { p =>
+    // FTQ gates on `p.valid`; the rest of the fields are unconditionally
+    // driven and FTQ ignores them when valid is false. Avoiding a
+    // `.otherwise { ... 0.U.asTypeOf(PrunedAddr(...)) }` branch sidesteps
+    // an implicit-Parameters resolution issue inside the `when` block.
+    p.valid                 := !s3_override && s1_usePair
+    p.secondStartPc         := s1_ubtbPair.bits.first.target
+    p.secondTarget          := s1_ubtbPair.bits.second.target
+    p.secondCfiOffset.valid := !s3_override && s1_usePair
+    p.secondCfiOffset.bits  := getFtqOffset(
+      s1_ubtbPair.bits.first.target,
+      s1_ubtbPair.bits.second.cfiPosition
+    )
+  }
+
+  /* *** pair-fire signal + aBTB/uTAGE 1-cycle suppress *** */
+  private val s1_pairFire = if (EnableTwoTaken)
+    s1_usePair && io.toFtq.prediction.fire && !s3_override
+    else false.B
+  private val s1_lastPairFire = RegNext(s1_pairFire, init = false.B)
+  // Effective aBTB valid: suppress one cycle after a pair fire (mismatched
+  // ahead chain — see docs/ubtb_pair_abtb_sync.md §5). uTAGE is also
+  // suppressed implicitly: uTAGE only contributes via s1_abtbTakenMask, so
+  // gating aBTB valid masks uTAGE's effect on this prediction as well.
+  s1_abtbValidEffective := s1_abtbValid && !(EnableTwoTaken.B && s1_lastPairFire)
+  dontTouch(s1_pairFire)
+  dontTouch(s1_lastPairFire)
+
   // used for meta enqueue and s3 override
   private val s2_ftqPtr = RegEnable(io.fromFtq.bpuPtr, s1_fire)
   private val s3_ftqPtr = RegEnable(s2_ftqPtr, s2_fire)
@@ -437,13 +505,21 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   io.toFtq.meta.bits.resolveMeta  := s3_resolveMeta
   io.toFtq.meta.bits.commitMeta   := s3_commitMeta
 
-  /* *** s0_startPc selection *** */
+  /* *** s0_startPc selection ***
+   *
+   *  Pair fire bypasses the first.target (B.target) and jumps directly to
+   *  the second.target (D), so the BPU pipeline never observes B as its
+   *  own s1_startPc. This preserves the fastTrain path (still trained for
+   *  first only; D is naturally learned in the next single-mode cycle).
+   *  See docs/ubtb_pair_abtb_sync.md §4.2.
+   */
   s0_startPc := MuxCase(
     s0_startPcReg,
     Seq(
-      redirect.valid -> redirect.bits.target,
-      s3_override    -> s3_prediction.target,
-      s1_valid       -> s1_prediction.target
+      redirect.valid                                   -> redirect.bits.target,
+      s3_override                                      -> s3_prediction.target,
+      (s1_valid && EnableTwoTaken.B && s1_usePair)     -> s1_ubtbPair.bits.second.target,
+      s1_valid                                         -> s1_prediction.target
     )
   )
 
@@ -464,6 +540,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   phr.io.train.s1_valid      := s1_fire
   phr.io.train.s1_prediction := s1_prediction
   phr.io.train.s1_startPc    := s1_startPc
+  // Pair-second info (EnableTwoTaken only): hands the second branch's
+  // (cfiPc, target) to PHR for the two-stage shift in the same cycle.
+  phr.io.train.s1_pairSecond.foreach { p =>
+    p.valid  := s1_usePair && s1_fire && !s3_override
+    p.cfiPc  := getCfiPcFromPosition(s1_ubtbPair.bits.first.target, s1_ubtbPair.bits.second.cfiPosition)
+    p.target := s1_ubtbPair.bits.second.target
+  }
 
   phr.io.commit.valid := io.fromFtq.train.fire
   phr.io.commit.bits  := train
@@ -598,6 +681,19 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   XSPerfAccumulate("toFtqFire", io.toFtq.prediction.fire)
   XSPerfAccumulate("s3Override", io.toFtq.prediction.fire && io.toFtq.prediction.bits.s3Override)
+
+  if (EnableTwoTaken) {
+    XSPerfAccumulate("pairFire", s1_pairFire)
+    XSPerfAccumulate("pairFireWhileAbtbInvalid", s1_pairFire && !s1_abtbValid)
+    XSPerfAccumulate("pairFireWhileAbtbAgrees",  s1_pairFire && abtbUbtbAgree)
+    XSPerfAccumulate("pairBlockedByAbtb",
+      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && s1_abtbValid && !abtbUbtbAgree)
+    XSPerfAccumulate("pairBlockedByS3Override",
+      s1_usePair && s3_override && io.toFtq.prediction.fire)
+    XSPerfAccumulate("abtbSuppressedByPair", s1_lastPairFire && s1_abtbValid)
+    XSPerfAccumulate("pairFireToFtq",
+      io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
+  }
   XSPerfHistogram(
     "fetchBlockSize",
     Mux(

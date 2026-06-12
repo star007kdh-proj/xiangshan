@@ -20,6 +20,7 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import xiangshan.XSCoreParamsKey
 import xiangshan.frontend.bpu.BranchAttribute
+import xiangshan.frontend.bpu.Prediction
 import xiangshan.frontend.bpu.SaturateCounter
 import xiangshan.frontend.bpu.SaturateCounterFactory
 import xiangshan.frontend.bpu.TargetCarry
@@ -29,6 +30,11 @@ object UsefulCounter extends SaturateCounterFactory {
     p(XSCoreParamsKey).frontendParameters.bpuParameters.ubtbParameters.UsefulCntWidth
 }
 
+/** uBTB entry. With `EnableTwoTaken`, `slot2` holds the chained second branch
+ *  of a (B, C) pair; `isPair` qualifies whether the pair is currently alive.
+ *  When EnableTwoTaken is false the pair fields are omitted (Option = None)
+ *  and slot2 is held inert as in the baseline.
+ */
 class MicroBtbEntry(implicit p: Parameters) extends MicroBtbBundle {
   class SlotBase extends Bundle {
     // branch position: at fetchBlockVAddr + position
@@ -52,6 +58,8 @@ class MicroBtbEntry(implicit p: Parameters) extends MicroBtbBundle {
     val valid: Bool = Bool()
     // whether branch in slot 2 is predicted as taken
     val taken: Bool = Bool()
+    // pair confidence (2-bit saturating). Bumped on chain re-confirm, reset on re-alloc.
+    val confidence: Option[UInt] = if (EnableTwoTaken) Option(UInt(PairConfWidth.W)) else None
   }
 
   // we consider an entry is valid if it has usefulCnt > 0
@@ -63,6 +71,11 @@ class MicroBtbEntry(implicit p: Parameters) extends MicroBtbBundle {
 
   val slot1: Slot1 = new Slot1
   val slot2: Slot2 = new Slot2
+
+  /** True iff this entry currently holds a live (B, C) pair.
+   *  Only present (and meaningful) when `EnableTwoTaken`.
+   */
+  val isPair: Option[Bool] = if (EnableTwoTaken) Option(Bool()) else None
 }
 
 class MicroBtbMeta(implicit p: Parameters) extends MicroBtbBundle {
@@ -71,4 +84,27 @@ class MicroBtbMeta(implicit p: Parameters) extends MicroBtbBundle {
 
 class ReplacerPerfInfo(implicit p: Parameters) extends MicroBtbBundle {
   val replaceNotUseful: Bool = Bool() // if not, replacePlru
+}
+
+/** uBTB pair lookup output. Drives BPU top's pair-fire decision in s1.
+ *  Only instantiated when `EnableTwoTaken`. When the pair is not alive
+ *  (entry miss, or hit without pair) `isPair` is false and BPU falls back
+ *  to the single-prediction path on `MicroBtb.io.prediction`.
+ */
+class MicroBtbPairOut(implicit p: Parameters) extends MicroBtbBundle {
+  /** Always-taken first branch (B). Equal to `MicroBtb.io.prediction.bits`
+   *  when `isPair` is asserted.
+   */
+  val first: Prediction = new Prediction
+
+  /** Always-taken second branch (C). `startPc` of the predicted second
+   *  fetch-block equals `first.target`.
+   */
+  val second: Prediction = new Prediction
+
+  /** Whether the lookup yields a usable pair (entry hit AND slot2 valid). */
+  val isPair: Bool = Bool()
+
+  /** Pair confidence (saturating); BPU gates emit on `>= PairConfThreshold`. */
+  val confidence: UInt = UInt(PairConfWidth.W)
 }

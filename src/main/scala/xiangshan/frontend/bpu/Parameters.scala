@@ -36,6 +36,14 @@ case class BpuParameters(
     FetchBlockAlignSize: Option[Int] = None, // bytes, if None, use half-align (FetchBLockSize / 2) by default
     // debug
     EnableBpTrace: Boolean = false,
+    // Master toggle for 2-taken support: uBTB pair entry + PHR two-stage shift.
+    // When false, all 2-taken logic is compile-time stripped and generated Verilog
+    // is identical to the baseline. Must be enabled together across uBTB/PHR.
+    EnableTwoTaken: Boolean = false,
+    // Pair confidence counter (2-bit saturating). Pair emit requires
+    // confidence >= PairConfThreshold. Shared across uBTB/BPU.
+    PairConfWidth:     Int = 2,
+    PairConfThreshold: Int = 2,
     // history
     phrParameters:      PhrParameters = PhrParameters(),
     commonHRParameters: CommonHRParameters = CommonHRParameters(),
@@ -53,7 +61,13 @@ case class BpuParameters(
 trait HasBpuParameters extends HasFrontendParameters {
   def bpuParameters: BpuParameters = frontendParameters.bpuParameters
 
-  def EnableBpTrace: Boolean = bpuParameters.EnableBpTrace
+  def EnableBpTrace:  Boolean = bpuParameters.EnableBpTrace
+  def EnableTwoTaken: Boolean = bpuParameters.EnableTwoTaken
+
+  // Pair confidence parameters (master location; uBTB/BPU all reference here).
+  def PairConfWidth:     Int = bpuParameters.PairConfWidth
+  def PairConfThreshold: Int = bpuParameters.PairConfThreshold
+  def PairConfMax:       Int = (1 << PairConfWidth) - 1
 
   // general
   def FetchBlockSizeWidth:    Int = log2Ceil(FetchBlockSize)

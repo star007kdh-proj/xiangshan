@@ -45,6 +45,7 @@ import xiangshan.frontend.FtqToBpuIO
 import xiangshan.frontend.FtqToICacheIO
 import xiangshan.frontend.FtqToIfuIO
 import xiangshan.frontend.IfuToFtqIO
+import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.PrunedAddrInit
 import xiangshan.frontend.bpu.BpuCommitMeta
 import xiangshan.frontend.bpu.BpuPredictionSource
@@ -99,6 +100,12 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // metaQueueRedirect stores speculation information needed by BPU when redirect happens.
   private val metaQueueRedirect = Reg(Vec(FtqSize, new BpuRedirectMeta))
 
+  // Pair-tracking sidecar (EnableTwoTaken only). isPairFirst marks the first
+  // FTQ slot of a pair enqueue; pairFirstStartPc remembers the first entry's
+  // startPc so a redirect targeting the second slot can demote the uBTB pair.
+  private val isPairFirst       = RegInit(VecInit.fill(FtqSize)(false.B))
+  private val pairFirstStartPc  = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
+
   // metaQueue stores information needed to train BPU.
   private val metaQueueResolve = Reg(Vec(FtqSize, new BpuResolveMeta))
   private val metaQueueCommit  = Reg(Vec(FtqSize, new BpuCommitMeta))
@@ -150,9 +157,11 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   // We limit the distance between BP and IF and stall counts of BP train so that branch update can be written back to
   // BPU
-  io.fromBpu.prediction.ready := distanceBetween(bpuPtr(0), commitPtr(0)) < FtqSize.U &&
-    distanceBetween(bpuPtr(0), ifuPtr(0)) < BpRunAheadDistance.U &&
-    bpTrainStallCnt < BpTrainStallLimit.U
+  // With pair enqueue we need 2 slots of headroom instead of 1 — reserve an extra slot when EnableTwoTaken.
+  io.fromBpu.prediction.ready :=
+    distanceBetween(bpuPtr(0), commitPtr(0)) < (FtqSize - (if (EnableTwoTaken) 1 else 0)).U &&
+      distanceBetween(bpuPtr(0), ifuPtr(0)) < BpRunAheadDistance.U &&
+      bpTrainStallCnt < BpTrainStallLimit.U
   io.fromBpu.meta.ready := true.B
 
   private val prediction = io.fromBpu.prediction
@@ -162,6 +171,19 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.bpuPtr := bpuPtr(0)
   private val bpuEnqueue = prediction.fire && !redirect.valid
 
+  /** Pair enqueue from BPU. When true, two entries are pushed in the same
+   *  cycle (`bpuPtr += 2`) and the second slot is populated from
+   *  `prediction.bits.pair.get`. Mutually exclusive with `s3Override` by
+   *  construction (BPU does not assert `pair.valid` on override path).
+   */
+  private val pairEnq: Bool =
+    prediction.bits.pair.map(_.valid).getOrElse(false.B) && bpuEnqueue
+
+  XSError(
+    pairEnq && prediction.bits.s3Override,
+    "Pair enqueue and s3Override must not be asserted in the same cycle\n"
+  )
+
   private val predictionPtr = MuxCase(
     bpuPtr(0),
     Seq(
@@ -170,7 +192,13 @@ class Ftq(implicit p: Parameters) extends FtqModule
   )
 
   when(prediction.bits.s3Override) {
+    // s3Override squashes any earlier pair second sitting at (s3FtqPtr + 1).
+    // The ptr roll-back makes (s3FtqPtr + 1) the next write target; the next
+    // cycle's prediction will overwrite that slot with fresh data, and the
+    // IFU/PF flush below catches any in-flight fetch on the squashed slot.
     bpuPtr := io.fromBpu.s3FtqPtr + 1.U
+  }.elsewhen(pairEnq) {
+    bpuPtr := bpuPtr + 2.U
   }.elsewhen(bpuEnqueue) {
     bpuPtr := bpuPtr + 1.U
   }
@@ -178,6 +206,22 @@ class Ftq(implicit p: Parameters) extends FtqModule
   when((prediction.fire || bpuS3Redirect) && !redirect.valid) {
     entryQueue(predictionPtr.value).startPc        := prediction.bits.startPc
     entryQueue(predictionPtr.value).takenCfiOffset := prediction.bits.takenCfiOffset
+    when(pairEnq) {
+      val p         = prediction.bits.pair.get
+      val secondPtr = predictionPtr + 1.U
+      entryQueue(secondPtr.value).startPc        := p.secondStartPc
+      entryQueue(secondPtr.value).takenCfiOffset := p.secondCfiOffset
+    }
+    // Pair sidecar: mark this slot as pair-first iff pair enqueue this cycle.
+    // s3 override and single enqueue both clear the flag (defensive — second
+    // slot's flag also clears so next enqueue starts clean).
+    if (EnableTwoTaken) {
+      isPairFirst(predictionPtr.value) := pairEnq
+      when(pairEnq) {
+        pairFirstStartPc(predictionPtr.value) := prediction.bits.startPc
+        isPairFirst((predictionPtr + 1.U).value) := false.B
+      }
+    }
   }
 
   when(io.fromBpu.meta.valid) {
@@ -321,6 +365,18 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.redirect.bits.attribute := redirect.bits.attribute
   io.toBpu.redirect.bits.meta      := metaQueueRedirect(redirect.bits.ftqIdx.value)
   io.toBpu.redirectFromIFU         := ifuRedirect.valid
+
+  // Pair second mispred markers (EnableTwoTaken). Identify by checking whether
+  // the prior FTQ slot was marked pair-first; carry the first entry's startPc
+  // so BPU can issue a uBTB pair demote.
+  io.toBpu.redirect.bits.isPairSecond.foreach { p =>
+    val prevIdx = (redirect.bits.ftqIdx - 1.U).value
+    p := redirect.valid && isPairFirst(prevIdx)
+  }
+  io.toBpu.redirect.bits.pairFirstStartPc.foreach { p =>
+    val prevIdx = (redirect.bits.ftqIdx - 1.U).value
+    p := pairFirstStartPc(prevIdx)
+  }
 
   resolveQueue.io.backendRedirect    := backendRedirect.valid
   resolveQueue.io.backendRedirectPtr := backendRedirect.bits.ftqIdx

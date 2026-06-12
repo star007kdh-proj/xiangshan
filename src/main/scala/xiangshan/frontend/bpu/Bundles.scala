@@ -189,6 +189,24 @@ class BpuCtrl extends Bundle {
   val rasEnable:    Bool = Bool()
 }
 
+/** Second-entry payload of a pair enqueue (BPU -> FTQ).
+ *  Present only when `EnableTwoTaken`. When `valid`, FTQ pushes two entries
+ *  in a single cycle (`bpuPtr += 2`) with this bundle describing the second
+ *  entry's start / takenCfiOffset / target.
+ */
+class BpuPairSecond(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
+  /** Pair enqueue is active. */
+  val valid: Bool = Bool()
+  /** Second entry's start PC (= first entry's target). */
+  val secondStartPc: PrunedAddr = PrunedAddr(VAddrBits)
+  /** Second entry's final target (= pair second branch's target). */
+  val secondTarget: PrunedAddr = PrunedAddr(VAddrBits)
+  /** Second entry's takenCfiOffset. `.valid` is always true for a live pair
+   *  (the pair is always 2-taken).
+   */
+  val secondCfiOffset: Valid[UInt] = Valid(UInt(CfiPositionWidth.W))
+}
+
 // Bpu -> Ftq
 class BpuPrediction(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
   val startPc:        PrunedAddr  = PrunedAddr(VAddrBits)
@@ -197,11 +215,15 @@ class BpuPrediction(implicit p: Parameters) extends BpuBundle with HalfAlignHelp
   // override valid
   val s3Override: Bool = Bool()
 
+  /** Pair second entry. Present only when `EnableTwoTaken`. */
+  val pair: Option[BpuPairSecond] = if (EnableTwoTaken) Option(new BpuPairSecond) else None
+
   def fromStage(startPc: PrunedAddr, prediction: Prediction): Unit = {
     this.startPc              := startPc
     this.takenCfiOffset.valid := prediction.taken
     this.takenCfiOffset.bits  := getFtqOffset(startPc, prediction.cfiPosition)
     this.target               := prediction.target
+    this.pair.foreach(_ := 0.U.asTypeOf(new BpuPairSecond))
   }
 }
 
@@ -213,6 +235,12 @@ class BpuRedirect(implicit p: Parameters) extends BpuBundle {
   val taken:     Bool            = Bool()
   val attribute: BranchAttribute = new BranchAttribute
   val meta:      BpuRedirectMeta = new BpuRedirectMeta
+
+  // Pair second mispred markers (EnableTwoTaken only). When true, the redirect
+  // is targeting the second slot of a uBTB pair dispatch; pairFirstStartPc
+  // identifies the first FTQ entry's startPc for uBTB demote lookup.
+  val isPairSecond:     Option[Bool]       = if (EnableTwoTaken) Option(Bool()) else None
+  val pairFirstStartPc: Option[PrunedAddr] = if (EnableTwoTaken) Option(PrunedAddr(VAddrBits)) else None
 }
 
 class BranchInfo(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {

@@ -42,6 +42,18 @@ object PhrPtr {
     apply(!ptr.flag, ptr.value)
 }
 
+/** Optional pair-second branch info carried alongside `PhrUpdateData`.
+ *  When `valid`, the spec-time update applies a two-stage shift in a single
+ *  cycle: `hash1 = pathHash(cfiPc, target)` for the first branch (B), then
+ *  `hash2 = pathHash(secondCfiPc, secondTarget)` for the second branch (C).
+ *  The PHR pointer advances by `2 * Shamt`.
+ */
+class PhrPairSecond(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
+  val valid:  Bool       = Bool()
+  val cfiPc:  PrunedAddr = PrunedAddr(VAddrBits)
+  val target: PrunedAddr = PrunedAddr(VAddrBits)
+}
+
 class PhrUpdateData(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
   val valid:     Bool                  = Bool()
   val taken:     Bool                  = Bool()
@@ -49,9 +61,13 @@ class PhrUpdateData(implicit p: Parameters) extends PhrBundle with HasPhrParamet
   val target:    PrunedAddr            = PrunedAddr(VAddrBits)
   val phrMeta:   PhrMeta               = new PhrMeta()
   val foldedPhr: PhrAllFoldedHistories = new PhrAllFoldedHistories(AllFoldedHistoryInfo)
+
+  /** Pair-second branch info. Present only when `EnableTwoTaken`. */
+  val pairSecond: Option[PhrPairSecond] =
+    if (EnableTwoTaken) Option(new PhrPairSecond) else None
 }
 
-class PhrUpdate(implicit p: Parameters) extends PhrBundle {
+class PhrUpdate(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
   // NOTE: if the StageCtrl structure changes, it may require refactoring
   val s0_stall:  Bool      = Bool()
   val stageCtrl: StageCtrl = new StageCtrl
@@ -62,15 +78,27 @@ class PhrUpdate(implicit p: Parameters) extends PhrBundle {
   val s1_prediction: Prediction = new Prediction()
   val s1_startPc:    PrunedAddr = PrunedAddr(VAddrBits)
 
+  /** Pair-second branch info from the s1 path. */
+  val s1_pairSecond: Option[PhrPairSecond] =
+    if (EnableTwoTaken) Option(new PhrPairSecond) else None
+
   val s3_override:   Bool       = Bool()
   val s3_phrMeta:    PhrMeta    = new PhrMeta()
   val s3_prediction: Prediction = new Prediction()
   val s3_startPc:    PrunedAddr = PrunedAddr(VAddrBits)
 }
 
-class PhrMeta(implicit p: Parameters) extends PhrBundle {
+class PhrMeta(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
   val phrPtr:     PhrPtr = new PhrPtr
   val phrLowBits: UInt   = UInt(PathHashHighWidth.W)
+
+  // When EnableTwoTaken, the pair-second FTQ slot replays from a phrPtr
+  // already advanced by `Shamt` (i.e. with the first branch's hash applied).
+  // FTQ writes this view into the second slot's metaQueueRedirect on pair
+  // enqueue, so a backend redirect targeting the second slot recovers from
+  // a self-contained snapshot.
+  val secondPhrPtr:     Option[PhrPtr] = if (EnableTwoTaken) Option(new PhrPtr) else None
+  val secondPhrLowBits: Option[UInt]   = if (EnableTwoTaken) Option(UInt(PathHashHighWidth.W)) else None
 
   // for debug
   val predFoldedHist: Option[PhrAllFoldedHistories] =

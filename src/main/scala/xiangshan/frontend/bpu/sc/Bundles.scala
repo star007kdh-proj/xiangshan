@@ -75,19 +75,22 @@ class ScMeta(implicit p: Parameters) extends ScBundle with HasScParameters {
   val scBWResp:        Vec[Vec[UInt]] = Vec(NumBWTables, Vec(NumWays, UInt(ScEntryWidth.W)))
   val scImliResp:      Vec[UInt]      = Vec(NumWays, UInt(ScEntryWidth.W))
   val scBiasResp:      Vec[UInt]      = Vec(BiasTableNumWays, UInt(ScEntryWidth.W))
-  val scBiasLowerBits: Vec[UInt]      = Vec(NumWays, UInt(BiasUseTageBitWidth.W))
-  val scPred:          Vec[Bool]      = Vec(NumWays, Bool())
-  val tagePred:        Vec[Bool]      = Vec(NumBtbResultEntries, Bool())
-  val tagePredValid:   Vec[Bool]      = Vec(NumBtbResultEntries, Bool())
-  val useScPred:       Vec[Bool]      = Vec(NumWays, Bool())
-  val sumAboveThres:   Vec[Bool]      = Vec(NumWays, Bool())
+  // Per-branch-slot fields are sized to NumBtbPredEntries so that VC slot results are tracked
+  // alongside SRAM slot results. SRAM-row response fields (above) keep their NumWays/BiasTableNumWays
+  // sizing because they reflect the SC SRAM lane geometry.
+  val scBiasLowerBits: Vec[UInt] = Vec(NumBtbPredEntries, UInt(BiasUseTageBitWidth.W))
+  val scPred:          Vec[Bool] = Vec(NumBtbPredEntries, Bool())
+  val tagePred:        Vec[Bool] = Vec(NumBtbPredEntries, Bool())
+  val tagePredValid:   Vec[Bool] = Vec(NumBtbPredEntries, Bool())
+  val useScPred:       Vec[Bool] = Vec(NumBtbPredEntries, Bool())
+  val sumAboveThres:   Vec[Bool] = Vec(NumBtbPredEntries, Bool())
 
   // for debug
-  val debug_scPathTakenVec:   Option[Vec[Bool]] = Some(Vec(NumWays, Bool()))
-  val debug_scGlobalTakenVec: Option[Vec[Bool]] = Some(Vec(NumWays, Bool()))
-  val debug_scBWTakenVec:     Option[Vec[Bool]] = Some(Vec(NumWays, Bool()))
-  val debug_scImliTakenVec:   Option[Vec[Bool]] = Some(Vec(NumWays, Bool()))
-  val debug_scBiasTakenVec:   Option[Vec[Bool]] = Some(Vec(NumWays, Bool()))
+  val debug_scPathTakenVec:   Option[Vec[Bool]] = Some(Vec(NumBtbPredEntries, Bool()))
+  val debug_scGlobalTakenVec: Option[Vec[Bool]] = Some(Vec(NumBtbPredEntries, Bool()))
+  val debug_scBWTakenVec:     Option[Vec[Bool]] = Some(Vec(NumBtbPredEntries, Bool()))
+  val debug_scImliTakenVec:   Option[Vec[Bool]] = Some(Vec(NumBtbPredEntries, Bool()))
+  val debug_scBiasTakenVec:   Option[Vec[Bool]] = Some(Vec(NumBtbPredEntries, Bool()))
   val debug_predPathIdx: Option[Vec[UInt]] =
     Some(Vec(NumPathTables, UInt(log2Ceil(scParameters.PathTableInfos(0).Size).W)))
   val debug_predGlobalIdx: Option[Vec[UInt]] =

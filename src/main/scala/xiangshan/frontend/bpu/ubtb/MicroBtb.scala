@@ -22,15 +22,31 @@ import utility.XSPerfAccumulate
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BasePredictor
 import xiangshan.frontend.bpu.BasePredictorIO
+import xiangshan.frontend.bpu.BpuFastTrain
 import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.frontend.bpu.HasFastTrainIO
 import xiangshan.frontend.bpu.Prediction
 
-// TODO: 2-taken
+/** Micro-BTB.
+ *
+ *  Register-based, fully-associative BTB at BP1. With `EnableTwoTaken`,
+ *  each entry can hold a (B, C) 2-taken pair in slot2 in addition to the
+ *  single-taken slot1. Pair lookup is combinational (`pairPrediction`
+ *  Option output) and gated by BPU top.
+ */
 class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbParameters with Helpers {
   class MicroBtbIO(implicit p: Parameters) extends BasePredictorIO with HasFastTrainIO {
     // predict
     val prediction: Valid[Prediction] = Output(Valid(new Prediction))
+    // pair prediction, present only when EnableTwoTaken
+    val pairPrediction: Option[Valid[MicroBtbPairOut]] =
+      if (EnableTwoTaken) Option(Output(Valid(new MicroBtbPairOut))) else None
+    /** Demote a pair entry by its first-branch startPc. Asserted by BPU when
+     *  a backend redirect targets the pair's second FTQ entry, signalling that
+     *  the pair's slot2 is misprediction-prone and should be invalidated.
+     */
+    val pairDemote: Option[Valid[PrunedAddr]] =
+      if (EnableTwoTaken) Option(Input(Valid(PrunedAddr(VAddrBits)))) else None
   }
 
   val io: MicroBtbIO = IO(new MicroBtbIO)
@@ -39,6 +55,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   println(f"  Size(full-assoc): $NumEntries")
   println(f"  Use fast-train: $UseFastTrain")
   println(f"  Replacer: $Replacer")
+  println(f"  EnableTwoTaken (pair): $EnableTwoTaken")
   println(f"  Address fields:")
   addrFields.show(indent = 4)
 
@@ -81,6 +98,29 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   io.prediction.bits.cfiPosition := s1_hitEntry.slot1.position
   io.prediction.bits.target      := getFullTarget(s1_startPc, s1_hitEntry.slot1.target, s1_hitEntry.slot1.targetCarry)
   io.prediction.bits.attribute   := s1_hitEntry.slot1.attribute
+
+  /* *** predict stage 1: pair output (EnableTwoTaken only) ***
+   * Combinational pair lookup. Drives BPU top's pair-fire decision.
+   * `second.target` uses `first.target` as its fetch-block base, since the
+   * second fetch-block starts at first.target by construction of the pair.
+   */
+  if (EnableTwoTaken) {
+    val s1_isPair = s1_hitEntry.isPair.get && s1_hitEntry.slot2.valid
+    val pairOut   = Wire(Valid(new MicroBtbPairOut))
+    pairOut.valid             := s1_hit && s1_isPair
+    pairOut.bits.isPair       := s1_isPair
+    pairOut.bits.first        := io.prediction.bits
+    pairOut.bits.confidence   := s1_hitEntry.slot2.confidence.getOrElse(0.U)
+    pairOut.bits.second.taken := true.B // pair is always (taken, taken)
+    pairOut.bits.second.cfiPosition := s1_hitEntry.slot2.position
+    pairOut.bits.second.attribute   := s1_hitEntry.slot2.attribute
+    pairOut.bits.second.target := getFullTarget(
+      io.prediction.bits.target,
+      s1_hitEntry.slot2.target,
+      s1_hitEntry.slot2.targetCarry
+    )
+    io.pairPrediction.get := pairOut
+  }
 
   // update replacer
   replacer.io.predTouch.valid := s1_hit && s1_fire
@@ -189,8 +229,10 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       t1_updatedEntry.slot1.target         := t1_target
       t1_updatedEntry.slot1.isStaticTarget := true.B // inits at true, set to false when we see a different target
       t1_updatedEntry.slot1.targetCarry.foreach(_ := t1_targetCarry.get) // if (EnableTargetFix)
-      // TODO: 2-taken train
+      // Pair is freshly invalidated on entry init; promotion may re-arm slot2 below.
       t1_updatedEntry.slot2.valid := false.B
+      t1_updatedEntry.isPair.foreach(_ := false.B)
+      t1_updatedEntry.slot2.confidence.foreach(_ := 0.U)
     }.otherwise {
       t1_updatedEntry.usefulCnt := t1_hitEntry.usefulCnt.getDecrease()
     }
@@ -208,6 +250,10 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       when(!t1_hitTargetSame) {
         t1_updatedEntry.slot1.isStaticTarget := false.B
       }
+      // Pair demotion: BR1 mismatch / not-taken invalidates any live pair.
+      t1_updatedEntry.slot2.valid := false.B
+      t1_updatedEntry.isPair.foreach(_ := false.B)
+      t1_updatedEntry.slot2.confidence.foreach(_ := 0.U)
     }.otherwise {
       // everything matches, and actually taken
       // increase usefulCnt
@@ -215,12 +261,133 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     }
   }
 
+  /* *** pair promotion / demotion (EnableTwoTaken only) ***
+   *
+   *  Promotion: when two consecutive fastTrain cycles form a (prev, cur) chain
+   *  with prev.taken && cur.startPc == prev.target and both attributes meeting
+   *  pair constraints (BR1 != call/ret, BR2 == direct unconditional), arm
+   *  slot2 of the BR1 entry (looked up by tag(prev.startPc)).
+   *
+   *  Demotion: handled implicitly above — BR1 not-taken or attribute mismatch
+   *  unconditionally clears slot2.valid / isPair in the same generic update.
+   */
+  private val pairPrev_valid = if (EnableTwoTaken) RegInit(false.B) else WireDefault(false.B)
+  private val pairPrev_ft    = if (UseFastTrain && EnableTwoTaken)
+    Reg(chiselTypeOf(io.fastTrain.get.bits)) else WireDefault(0.U.asTypeOf(new BpuFastTrain))
+  if (UseFastTrain && EnableTwoTaken) {
+    pairPrev_valid := io.fastTrain.get.valid && io.enable
+    when(io.fastTrain.get.valid && io.enable) {
+      pairPrev_ft := io.fastTrain.get.bits
+    }
+  }
+
+  private val t0_pairChain =
+    if (UseFastTrain && EnableTwoTaken) {
+      val cur = io.fastTrain.get
+      val prev_pred = pairPrev_ft.finalPrediction
+      val cur_pred  = cur.bits.finalPrediction
+      pairPrev_valid && cur.valid && io.enable &&
+        prev_pred.taken && cur_pred.taken &&
+        (cur.bits.startPc.toUInt === prev_pred.target.toUInt) &&
+        // self-loop skip: do not promote (A, A) entries
+        (cur.bits.startPc.toUInt =/= pairPrev_ft.startPc.toUInt) &&
+        // BR1 must not be call / ret (RAS sync)
+        !prev_pred.attribute.hasPush && !prev_pred.attribute.hasPop &&
+        // BR2 must be direct unconditional jump (no TAGE-SC / ITTAGE / RAS conflict)
+        cur_pred.attribute.isDirect &&
+        !cur_pred.attribute.hasPush && !cur_pred.attribute.hasPop
+    } else false.B
+
+  private val t0_promoteTag    = if (EnableTwoTaken) getTag(pairPrev_ft.startPc) else 0.U
+  private val t0_promoteHitOH  = if (EnableTwoTaken)
+    VecInit(entries.map(e => e.valid && e.tag === t0_promoteTag)).asUInt else 0.U
+  private val t0_promoteHit    = if (EnableTwoTaken) (t0_promoteHitOH.orR && t0_pairChain) else false.B
+  private val t0_promoteHitIdx = if (EnableTwoTaken) OHToUInt(t0_promoteHitOH) else 0.U
+
+  // latch promotion data into t1
+  private val t1_promote     = RegNext(t0_promoteHit, init = false.B)
+  private val t1_promoteIdx  = RegEnable(t0_promoteHitIdx, t0_promoteHit)
+  private val t1_promoteSlot2Pos   =
+    if (UseFastTrain && EnableTwoTaken)
+      RegEnable(io.fastTrain.get.bits.finalPrediction.cfiPosition, t0_promoteHit) else 0.U
+  private val t1_promoteSlot2Attr  =
+    if (UseFastTrain && EnableTwoTaken)
+      RegEnable(io.fastTrain.get.bits.finalPrediction.attribute, t0_promoteHit) else 0.U.asTypeOf(new BranchAttribute)
+  private val t1_promoteSlot2Tgt   =
+    if (UseFastTrain && EnableTwoTaken)
+      RegEnable(getEntryTarget(io.fastTrain.get.bits.finalPrediction.target), t0_promoteHit) else 0.U
+  private val t1_promoteSlot2Carry =
+    if (UseFastTrain && EnableTwoTaken && EnableTargetFix)
+      Some(RegEnable(getTargetCarry(io.fastTrain.get.bits.startPc, io.fastTrain.get.bits.finalPrediction.target),
+        t0_promoteHit)) else None
+
   // select the entry: if hit, use the hit entry, otherwise use the victim from replacer (first not useful, or Plru)
   t1_allocate  := !t1_hit && t1_actualTaken
   t1_updateIdx := Mux(t1_hit, t1_hitIdx, replacer.io.victim)
   // and write back the updated entry
   when(t1_fire && (t1_hit || t1_allocate)) { // update entry if hit, or alloc entry only for taken branches
     entries(t1_updateIdx) := t1_updatedEntry
+  }
+
+  /* *** pair promotion write-back (EnableTwoTaken only) ***
+   *
+   *  Apply slot2 arming AFTER the generic update so that promotion can re-arm
+   *  slot2 on entries whose slot1 was just refreshed. Skip when the generic
+   *  update targets the same entry idx (conflict avoidance: generic update
+   *  invalidates pair on mismatch, promotion would otherwise re-arm an entry
+   *  whose BR1 just changed).
+   */
+  if (EnableTwoTaken) {
+    val t1_promoteConflict = t1_fire && (t1_hit || t1_allocate) && (t1_promoteIdx === t1_updateIdx)
+    // Distinguish chain re-confirm (same BR2 PC) vs fresh slot2 alloc.
+    // Re-confirm: saturating +1. Fresh: confidence := 1.
+    val target     = entries(t1_promoteIdx)
+    val priorPair  = target.isPair.map(_ && target.slot2.valid).getOrElse(false.B)
+    val sameBR2    = priorPair &&
+      target.slot2.position  === t1_promoteSlot2Pos &&
+      target.slot2.attribute === t1_promoteSlot2Attr &&
+      target.slot2.target    === t1_promoteSlot2Tgt
+    when(t1_promote && !t1_promoteConflict) {
+      entries(t1_promoteIdx).isPair.foreach(_ := true.B)
+      entries(t1_promoteIdx).slot2.valid       := true.B
+      entries(t1_promoteIdx).slot2.taken       := true.B
+      // slot2 fields are unconditionally written; cheap because chain detect
+      // already enforces (position, attribute, target) consistency on match.
+      entries(t1_promoteIdx).slot2.position    := t1_promoteSlot2Pos
+      entries(t1_promoteIdx).slot2.attribute   := t1_promoteSlot2Attr
+      entries(t1_promoteIdx).slot2.target      := t1_promoteSlot2Tgt
+      t1_promoteSlot2Carry.foreach { c =>
+        entries(t1_promoteIdx).slot2.targetCarry.foreach(_ := c)
+      }
+      entries(t1_promoteIdx).slot2.confidence.foreach { c =>
+        val curConf = target.slot2.confidence.getOrElse(0.U)
+        val incConf = Mux(curConf === PairConfMax.U, curConf, curConf + 1.U)
+        c := Mux(sameBR2, incConf, 1.U)
+      }
+    }
+  }
+
+  /* *** pair demote write-back (A4, EnableTwoTaken only) ***
+   *
+   *  When BPU forwards a backend redirect that targeted a pair-second FTQ
+   *  entry, the corresponding pair-first uBTB entry has an unreliable slot2.
+   *  Locate it by tag(startPc) and invalidate slot2 + isPair + confidence.
+   *  Last-connect ordering: this runs AFTER the generic / promotion write-back
+   *  so demote wins on the same cycle.
+   */
+  if (EnableTwoTaken) {
+    val demoteReq    = io.pairDemote.get
+    val demoteTag    = getTag(demoteReq.bits)
+    val demoteHitOH  = VecInit(entries.map(e => e.valid && e.tag === demoteTag)).asUInt
+    val demoteHit    = demoteReq.valid && demoteHitOH.orR
+    val demoteHitIdx = OHToUInt(demoteHitOH)
+    when(demoteHit) {
+      entries(demoteHitIdx).isPair.foreach(_ := false.B)
+      entries(demoteHitIdx).slot2.valid := false.B
+      entries(demoteHitIdx).slot2.confidence.foreach(_ := 0.U)
+    }
+    XSPerfAccumulate("pairDemoteOnMispred", demoteHit)
+    XSPerfAccumulate("pairDemoteMiss",      demoteReq.valid && !demoteHitOH.orR)
   }
 
   // update replacer
@@ -251,4 +418,20 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
         t1_hitAttributeSame && !t1_hitPositionSame && t1_hitNotUseful
     )
   )
+
+  /* *** pair perf (EnableTwoTaken only) *** */
+  if (EnableTwoTaken) {
+    val s1_pairValid = io.pairPrediction.get.valid
+    XSPerfAccumulate("pairLookupHit", s1_pairValid && s1_fire)
+    XSPerfAccumulate("pairLookupHitAtThreshold",
+      s1_pairValid && s1_fire && (io.pairPrediction.get.bits.confidence >= PairConfThreshold.U))
+    XSPerfAccumulate("pairPromote", t1_promote)
+    XSPerfAccumulate("pairPromoteConflict",
+      t1_promote && t1_fire && (t1_hit || t1_allocate) && (t1_promoteIdx === t1_updateIdx))
+    XSPerfAccumulate("pairDemoteByNotTaken",
+      t1_fire && t1_hit && !t1_actualTaken && t1_hitEntry.isPair.get)
+    XSPerfAccumulate("pairDemoteByMismatch",
+      t1_fire && t1_hit && t1_actualTaken &&
+        (!t1_hitAttributeSame || !t1_hitPositionSame || !t1_hitTargetSame) && t1_hitEntry.isPair.get)
+  }
 }
