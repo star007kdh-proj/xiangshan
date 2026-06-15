@@ -41,9 +41,11 @@ case class BpuParameters(
     // is identical to the baseline. Must be enabled together across uBTB/PHR.
     EnableTwoTaken: Boolean = false,
     // Pair confidence counter (2-bit saturating). Pair emit requires
-    // confidence >= PairConfThreshold. Shared across uBTB/BPU.
+    // confidence >= PairConfThreshold. Shared across uBTB/BPU. Default 3 (saturated):
+    // a slot B branch (esp. a conditional, which has no downstream TAGE/SC correction
+    // since the pair second bypasses S3) must be near-certainly taken to emit.
     PairConfWidth:     Int = 2,
-    PairConfThreshold: Int = 2,
+    PairConfThreshold: Int = 3,
     // history
     phrParameters:      PhrParameters = PhrParameters(),
     commonHRParameters: CommonHRParameters = CommonHRParameters(),

@@ -207,6 +207,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     p.valid := redirect.valid && isSecond
     p.bits  := redirect.bits.pairFirstStartPc.getOrElse(0.U.asTypeOf(redirect.bits.cfiPc))
   }
+  // Clear uBTB prevS3 snapshot on redirect so no pair is chained across a squash.
+  ubtb.io.redirectValid.foreach(_ := redirect.valid)
 
   utage.io.foldedPathHist         := phr.io.s0_foldedPhr
   utage.io.foldedPathHistForTrain := phr.io.trainFoldedPhr
@@ -320,11 +322,15 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s1_usePair = if (EnableTwoTaken)
     (!s1_abtbValid || abtbUbtbAgree) &&
       s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
-      (s1_ubtbPair.bits.confidence >= PairConfThreshold.U) &&       // emit gate by confidence
+      // emit gate by confidence (default threshold 3 = saturated; the alwaysTaken
+      // proxy for conditional slot B, which has no downstream TAGE/SC correction)
+      (s1_ubtbPair.bits.confidence >= PairConfThreshold.U) &&
       s1_ubtbPair.bits.first.taken &&
-      !s1_ubtbPair.bits.first.attribute.hasPush &&
+      // slot A: allow cond / direct-jmp / direct-call; reject return + indirect
       !s1_ubtbPair.bits.first.attribute.hasPop &&
-      s1_ubtbPair.bits.second.attribute.isDirect &&
+      !s1_ubtbPair.bits.first.attribute.isIndirect &&
+      // slot B: allow direct-jmp / conditional (alwaysTaken proxy); reject call + return + indirect
+      (s1_ubtbPair.bits.second.attribute.isDirect || s1_ubtbPair.bits.second.attribute.isConditional) &&
       !s1_ubtbPair.bits.second.attribute.hasPush &&
       !s1_ubtbPair.bits.second.attribute.hasPop
     else false.B
@@ -688,6 +694,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("pairFireWhileAbtbAgrees",  s1_pairFire && abtbUbtbAgree)
     XSPerfAccumulate("pairBlockedByAbtb",
       s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && s1_abtbValid && !abtbUbtbAgree)
+    XSPerfAccumulate("pairBlockedByConf",
+      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
+        (s1_ubtbPair.bits.confidence < PairConfThreshold.U))
     XSPerfAccumulate("pairBlockedByS3Override",
       s1_usePair && s3_override && io.toFtq.prediction.fire)
     XSPerfAccumulate("abtbSuppressedByPair", s1_lastPairFire && s1_abtbValid)
