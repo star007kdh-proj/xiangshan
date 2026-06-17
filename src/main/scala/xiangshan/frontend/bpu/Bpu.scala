@@ -319,9 +319,16 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       (s1_abtbResult.attribute   === s1_ubtbPair.bits.first.attribute)
     else false.B
 
+  // fetch-hungry gate: only fire a pair when prefetch has caught up (downstream
+  // hungry). Off when PairPrefetchHungryDist == 0.
+  private val s1_pairFetchHungry =
+    if (!EnableTwoTaken || PairPrefetchHungryDist == 0) true.B
+    else io.fromFtq.unprefetchedBlockNum.get < PairPrefetchHungryDist.U
+
   private val s1_usePair = if (EnableTwoTaken)
     (!s1_abtbValid || abtbUbtbAgree) &&
       s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
+      s1_pairFetchHungry &&
       // emit gate by confidence (default threshold 3 = saturated; the alwaysTaken
       // proxy for conditional slot B, which has no downstream TAGE/SC correction)
       (s1_ubtbPair.bits.confidence >= PairConfThreshold.U) &&
@@ -725,6 +732,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("pairBlockedByConf",
       s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
         (s1_ubtbPair.bits.confidence < PairConfThreshold.U))
+    XSPerfAccumulate("pairSuppressedByFtqOccupancy",
+      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && !s1_pairFetchHungry)
     XSPerfAccumulate("pairBlockedByS3Override",
       s1_usePair && s3_override && io.toFtq.prediction.fire)
     XSPerfAccumulate("abtbSuppressedByPair", s1_lastPairFire && s1_abtbValid)

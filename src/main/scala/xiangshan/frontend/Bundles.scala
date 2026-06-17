@@ -67,6 +67,12 @@ class FtqToBpuIO(implicit p: Parameters) extends FrontendBundle {
   val commit:          Valid[BpuCommit]      = Valid(new BpuCommit)
   val bpuPtr:          FtqPtr                = Output(new FtqPtr)
   val redirectFromIFU: Bool                  = Output(Bool())
+
+  // un-prefetched block count (bpuPtr - pfPtr) for the pair fetch-hungry gate.
+  val unprefetchedBlockNum: Option[UInt] =
+    if (coreParams.frontendParameters.bpuParameters.EnableTwoTaken)
+      Some(Output(UInt((log2Up(FtqSize) + 1).W)))
+    else None
 }
 
 // TODO: unify FetchRequestBundle (Ftq->Ifu) with FtqFetchRequest (Ftq->ICache.MainPipe)

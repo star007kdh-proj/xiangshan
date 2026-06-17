@@ -172,6 +172,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val bpuS3Redirect = prediction.valid && prediction.bits.s3Override
 
   io.toBpu.bpuPtr := bpuPtr(0)
+  // registered to avoid a combinational FTQ->BPU loop; 1-cycle stale is fine for
+  // an occupancy heuristic.
+  io.toBpu.unprefetchedBlockNum.foreach(_ := RegNext(distanceBetween(bpuPtr(0), pfPtr(0))))
   private val bpuEnqueue = prediction.fire && !redirect.valid
 
   /** Pair enqueue from BPU. When true, two entries are pushed in the same

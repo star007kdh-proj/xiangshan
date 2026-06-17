@@ -46,6 +46,9 @@ case class BpuParameters(
     // since the pair second bypasses S3) must be near-certainly taken to emit.
     PairConfWidth:     Int = 2,
     PairConfThreshold: Int = 3,
+    // Pair fires only when fewer than this many blocks are un-prefetched (prefetch
+    // caught up -> downstream hungry). 0 = gate off. cf. gem5 pairOnlyWhenFtqBelow.
+    PairPrefetchHungryDist: Int = 0,
     // history
     phrParameters:      PhrParameters = PhrParameters(),
     commonHRParameters: CommonHRParameters = CommonHRParameters(),
@@ -67,8 +70,9 @@ trait HasBpuParameters extends HasFrontendParameters {
   def EnableTwoTaken: Boolean = bpuParameters.EnableTwoTaken
 
   // Pair confidence parameters (master location; uBTB/BPU all reference here).
-  def PairConfWidth:     Int = bpuParameters.PairConfWidth
-  def PairConfThreshold: Int = bpuParameters.PairConfThreshold
+  def PairConfWidth:         Int = bpuParameters.PairConfWidth
+  def PairConfThreshold:     Int = bpuParameters.PairConfThreshold
+  def PairPrefetchHungryDist: Int = bpuParameters.PairPrefetchHungryDist
   def PairConfMax:       Int = (1 << PairConfWidth) - 1
 
   // general
