@@ -161,6 +161,16 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   private val shiftBits2 = if (EnableTwoTaken) hash2(Shamt - 1, 0) else 0.U(Shamt.W)
   private val hashHigh2  = if (EnableTwoTaken) hash2(PathHashWidth - 1, Shamt) else 0.U((PathHashWidth - Shamt).W)
 
+  // post-first phrLowBits L' (= phrLowBits at ptr P-Shamt after A's update), as a
+  // closed form of A's hash. Used by the pair second high recombination and meta.
+  private val pairLowPrime =
+    if (EnableTwoTaken)
+      VecInit((0 until PathHashHighWidth).map { k =>
+        if (k < Shamt) shiftBits(k)
+        else hashHigh(k - Shamt) ^ updateData.phrMeta.phrLowBits(k - Shamt)
+      }).asUInt
+    else 0.U(PathHashHighWidth.W)
+
   when(updateData.valid) {
     phrPtr    := updateData.phrMeta.phrPtr
     s0_phrPtr := updateData.phrMeta.phrPtr
@@ -175,11 +185,15 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
       for (i <- 1 to PathHashHighWidth) {
         phr((updateData.phrMeta.phrPtr + i.U).value) := hashHigh(i - 1) ^ updateData.phrMeta.phrLowBits(i - 1)
       }
-      // Stage 2 (pair only): shift in second branch's hash (next Shamt bits)
+      // Stage 2 (pair only): second branch's hash, as a single update at P-Shamt
+      // (low bits + high recombination), so the result matches two single updates.
       if (EnableTwoTaken) {
         when(pairValid) {
           for (i <- 0 until Shamt) {
             phr((updateData.phrMeta.phrPtr - (Shamt + i).U).value) := shiftBits2(Shamt - 1 - i)
+          }
+          for (i <- 1 to PathHashHighWidth) {
+            phr((updateData.phrMeta.phrPtr - Shamt.U + i.U).value) := hashHigh2(i - 1) ^ pairLowPrime(i - 1)
           }
         }
       }
@@ -227,15 +241,43 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
       )
     }
   }.elsewhen(s1_valid) {
-    s0_foldedPhr := s1_foldedPhrReg
     when(s1_overrideData.taken) {
-      s0_foldedPhr := s1_foldedPhrReg.update(
+      // fold the first branch (A)
+      val s1_folded1 = s1_foldedPhrReg.update(
         VecInit(getRedirectPhr(s1_overrideData.phrMeta).asBools),
         s1_overrideData.phrMeta.phrPtr,
         hashHigh,
         Shamt,
         shiftBits
       )
+      if (EnableTwoTaken) {
+        // on a pair, fold the second branch on top. Its oldest bits come from the
+        // post-first phr, so build that as a wire and align to P-Shamt (correct for
+        // all history lengths, unlike an L'-only view of the low H bits).
+        val s1_pairValid = s1_overrideData.pairSecond.get.valid && s1_overrideData.taken
+        val s1_P         = s1_overrideData.phrMeta.phrPtr
+        val s1_postAPhr  = WireInit(phr)
+        for (i <- 0 until Shamt) {
+          s1_postAPhr((s1_P - i.U).value) := shiftBits(Shamt - 1 - i)
+        }
+        for (i <- 1 to PathHashHighWidth) {
+          s1_postAPhr((s1_P + i.U).value) := hashHigh(i - 1) ^ s1_overrideData.phrMeta.phrLowBits(i - 1)
+        }
+        val s1_postAAligned =
+          (Cat(s1_postAPhr.asUInt, s1_postAPhr.asUInt) >> ((s1_P - Shamt.U).value + 1.U))(PhrHistoryLength - 1, 0)
+        val s1_folded2 = s1_folded1.update(
+          VecInit(s1_postAAligned.asBools),
+          s1_P - Shamt.U,
+          hashHigh2,
+          Shamt,
+          shiftBits2
+        )
+        s0_foldedPhr := Mux(s1_pairValid, s1_folded2, s1_folded1)
+      } else {
+        s0_foldedPhr := s1_folded1
+      }
+    }.otherwise {
+      s0_foldedPhr := s1_foldedPhrReg
     }
   }.otherwise {
     s0_foldedPhr := s0_foldedPhrReg
@@ -269,10 +311,9 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
     p := s1_phrPtr - Shamt.U
   }
   io.phrMeta.secondPhrLowBits.foreach { p =>
-    // The phrLowBits region [phrPtr+1 .. phrPtr+PathHashHighWidth] is unchanged
-    // by a single Shamt-bit shift on the high side, so the second-slot view of
-    // phrLowBits matches the first-slot view here.
-    p := s1_phrValue(PathHashHighWidth - 1, 0)
+    // post-first view: L', not the first-slot phrLowBits (which A's high
+    // recombination changes).
+    p := pairLowPrime
   }
   io.phr            := phr
   io.s0_foldedPhr   := s0_foldedPhr
