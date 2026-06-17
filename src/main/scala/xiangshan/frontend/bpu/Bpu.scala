@@ -506,10 +506,38 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_ftqPtr = RegEnable(s2_ftqPtr, s2_fire)
   io.toFtq.s3FtqPtr := s3_ftqPtr
 
+  // pipeline the pair-fire flag S1 -> S3 so the S3 meta knows it was a pair
+  private val s2_usePair = if (EnableTwoTaken) RegEnable(s1_usePair, s1_fire) else false.B
+  private val s3_usePair = if (EnableTwoTaken) RegEnable(s2_usePair, s2_fire) else false.B
+
   io.toFtq.meta.valid             := s3_valid
   io.toFtq.meta.bits.redirectMeta := s3_redirectMeta
   io.toFtq.meta.bits.resolveMeta  := s3_resolveMeta
   io.toFtq.meta.bits.commitMeta   := s3_commitMeta
+
+  /* *** pair second slot redirect meta (EnableTwoTaken only) ***
+   *
+   *  The pair second FTQ slot bypasses S3, so on a backend redirect targeting
+   *  it BPU must recover history from the "after first, before second" view:
+   *    - PHR: exact post-first snapshot (phrPtr advanced by Shamt).
+   *    - commonHR: post-first ghr/bw with empty block descriptors, so recovery
+   *      folds only the redirected branch (the live commonHR never saw B).
+   *    - RAS: first's view copied. Exact unless slot A is a call (then the post-
+   *      push view is approximated; valid pointers, self-heals via RAS commit).
+   *  Resolve/commit meta is not provided — second slot training is suppressed
+   *  in FTQ.
+   */
+  if (EnableTwoTaken) {
+    val s3_secondRedirectMeta = Wire(new BpuRedirectMeta)
+    s3_secondRedirectMeta := s3_redirectMeta // RAS + defaults copied from first
+    s3_secondRedirectMeta.phr.phrPtr     := s3_phrMeta.secondPhrPtr.get
+    s3_secondRedirectMeta.phr.phrLowBits := s3_phrMeta.secondPhrLowBits.get
+    s3_secondRedirectMeta.commonHRMeta.ghr := commonHR.io.s3PostGhr.get
+    s3_secondRedirectMeta.commonHRMeta.bw  := commonHR.io.s3PostBw.get
+    s3_secondRedirectMeta.commonHRMeta.hitMask.foreach(_ := false.B)
+    io.toFtq.meta.bits.isPair.get             := s3_usePair && !s3_override
+    io.toFtq.meta.bits.secondRedirectMeta.get := s3_secondRedirectMeta
+  }
 
   /* *** s0_startPc selection ***
    *
@@ -702,6 +730,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("abtbSuppressedByPair", s1_lastPairFire && s1_abtbValid)
     XSPerfAccumulate("pairFireToFtq",
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
+    // pairs whose slot A is a call: their second-slot RAS redirect meta is the
+    // approximated (pre-push) view; track frequency to gauge if exact post-push
+    // RAS recovery is worth building.
+    XSPerfAccumulate("pairFireCallA", s1_pairFire && s1_ubtbPair.bits.first.attribute.hasPush)
   }
   XSPerfHistogram(
     "fetchBlockSize",

@@ -19,6 +19,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.HasCircularQueuePtrHelper
+import xiangshan.XSCoreParamsKey
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BpuMeta
 import xiangshan.frontend.bpu.BpuPerfMeta
@@ -76,6 +77,14 @@ class FtqToCtrlIO(implicit p: Parameters) extends FtqBundle {
   val wen:     Bool       = Output(Bool())
   val ftqIdx:  UInt       = Output(UInt(FtqPtr.width.W))
   val startPc: PrunedAddr = Output(PrunedAddr(VAddrBits))
+
+  // Second write port for a pair enqueue (EnableTwoTaken only). A pair writes two
+  // FTQ entries in one cycle, so the backend pc mem needs both their startPcs;
+  // the single `wen`/`ftqIdx`/`startPc` port only covers the first entry.
+  private val enableTwoTaken: Boolean = p(XSCoreParamsKey).frontendParameters.bpuParameters.EnableTwoTaken
+  val pairWen:     Option[Bool]       = if (enableTwoTaken) Some(Output(Bool())) else None
+  val pairFtqIdx:  Option[UInt]       = if (enableTwoTaken) Some(Output(UInt(FtqPtr.width.W))) else None
+  val pairStartPc: Option[PrunedAddr] = if (enableTwoTaken) Some(Output(PrunedAddr(VAddrBits))) else None
 }
 
 class PerfMeta(implicit p: Parameters) extends FtqBundle {

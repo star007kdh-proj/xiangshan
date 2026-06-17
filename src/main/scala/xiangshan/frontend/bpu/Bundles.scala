@@ -330,6 +330,15 @@ class BpuMeta(implicit p: Parameters) extends BpuBundle {
   val redirectMeta: BpuRedirectMeta = new BpuRedirectMeta
   val resolveMeta:  BpuResolveMeta  = new BpuResolveMeta
   val commitMeta:   BpuCommitMeta   = new BpuCommitMeta
+
+  /** Pair second slot meta (EnableTwoTaken only). When `isPair`, FTQ writes
+   *  `secondRedirectMeta` into the second FTQ slot's metaQueueRedirect so a
+   *  backend redirect targeting that slot recovers speculative history from the
+   *  post-first ("before second") view instead of stale data. Resolve/commit
+   *  meta is NOT provided for the second slot — its training is suppressed.
+   */
+  val isPair:             Option[Bool]            = if (EnableTwoTaken) Some(Bool()) else None
+  val secondRedirectMeta: Option[BpuRedirectMeta] = if (EnableTwoTaken) Some(new BpuRedirectMeta) else None
 }
 
 /* *** internal const & type *** */

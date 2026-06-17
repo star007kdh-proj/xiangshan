@@ -101,7 +101,12 @@ class CtrlBlockImp(
   val rename = Module(new Rename)
   val redirectGen = Module(new RedirectGenerator)
   private def hasRen: Boolean = true
-  private val pcMem = Module(new SyncDataModuleTemplate(PrunedAddr(VAddrBits), FtqSize, numPcMemRead, 1, "BackendPC", hasRen = hasRen))
+  // With uBTB 2-taken, a pair enqueues two FTQ entries in one cycle, so the pc mem
+  // needs a second write port to store the second entry's startPc.
+  private val enableTwoTaken: Boolean = coreParams.frontendParameters.bpuParameters.EnableTwoTaken
+  private val numPcMemWrite:  Int     = if (enableTwoTaken) 2 else 1
+  private val pcMem =
+    Module(new SyncDataModuleTemplate(PrunedAddr(VAddrBits), FtqSize, numPcMemRead, numPcMemWrite, "BackendPC", hasRen = hasRen))
   private val rob = wrapper.rob.module
   private val memCtrl = Module(new MemCtrl(params))
 
@@ -748,6 +753,12 @@ class CtrlBlockImp(
   pcMem.io.wen.head   := GatedValidRegNext(io.frontend.fromFtq.wen)
   pcMem.io.waddr.head := RegEnable(io.frontend.fromFtq.ftqIdx, io.frontend.fromFtq.wen)
   pcMem.io.wdata.head := RegEnable(io.frontend.fromFtq.startPc, io.frontend.fromFtq.wen)
+  if (enableTwoTaken) {
+    val pairWen = io.frontend.fromFtq.pairWen.get
+    pcMem.io.wen(1)   := GatedValidRegNext(pairWen)
+    pcMem.io.waddr(1) := RegEnable(io.frontend.fromFtq.pairFtqIdx.get, pairWen)
+    pcMem.io.wdata(1) := RegEnable(io.frontend.fromFtq.pairStartPc.get, pairWen)
+  }
 
   io.toDataPath.flush := s2_s4_redirect
   io.toExuBlock.flush := s2_s4_redirect

@@ -36,6 +36,12 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     val s0_commonHR:   CommonHREntry       = Output(new CommonHREntry)
     val s3ResolveMeta: CommonHRResolveMeta = Output(new CommonHRResolveMeta)
 
+    // Post-s3-update ("post-first") ghr & bw, for the pair second FTQ slot's
+    // redirect meta (EnableTwoTaken only). These reflect the commonHR state
+    // *after* the s3 (first-block) update is folded in.
+    val s3PostGhr: Option[UInt] = if (EnableTwoTaken) Some(Output(UInt(GhrHistoryLength.W))) else None
+    val s3PostBw:  Option[UInt] = if (EnableTwoTaken) Some(Output(UInt(BWHistoryLength.W))) else None
+
     val s0_startPc: Option[PrunedAddr] = Some(Input(PrunedAddr(VAddrBits))) // for debug
   }
   val io = IO(new CommonHRIO)
@@ -111,6 +117,10 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     s3_firstTakenIsCond,
     Option(s3_taken && s3_bwTaken)
   )(BWHistoryLength)
+
+  // Post-first ghr/bw for the pair second slot's redirect meta.
+  io.s3PostGhr.foreach(_ := s3_newCommonHR.ghr)
+  io.s3PostBw.foreach(_ := s3_newCommonHR.bw)
 
   /*
    * redirect recovery CommonHR

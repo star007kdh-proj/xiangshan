@@ -105,6 +105,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // startPc so a redirect targeting the second slot can demote the uBTB pair.
   private val isPairFirst       = RegInit(VecInit.fill(FtqSize)(false.B))
   private val pairFirstStartPc  = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
+  // isPairSecond marks the second slot of a pair enqueue; its BPU resolve
+  // training is suppressed (no genuine lookup-time meta exists for it).
+  private val isPairSecond      = RegInit(VecInit.fill(FtqSize)(false.B))
 
   // metaQueue stores information needed to train BPU.
   private val metaQueueResolve = Reg(Vec(FtqSize, new BpuResolveMeta))
@@ -216,10 +219,12 @@ class Ftq(implicit p: Parameters) extends FtqModule
     // s3 override and single enqueue both clear the flag (defensive — second
     // slot's flag also clears so next enqueue starts clean).
     if (EnableTwoTaken) {
-      isPairFirst(predictionPtr.value) := pairEnq
+      isPairFirst(predictionPtr.value)  := pairEnq
+      isPairSecond(predictionPtr.value) := false.B // any enqueue to a slot clears its second flag
       when(pairEnq) {
         pairFirstStartPc(predictionPtr.value) := prediction.bits.startPc
-        isPairFirst((predictionPtr + 1.U).value) := false.B
+        isPairFirst((predictionPtr + 1.U).value)  := false.B
+        isPairSecond((predictionPtr + 1.U).value) := true.B
       }
     }
   }
@@ -229,6 +234,15 @@ class Ftq(implicit p: Parameters) extends FtqModule
     metaQueueRedirect(s3BpuPtr) := io.fromBpu.meta.bits.redirectMeta
     metaQueueResolve(s3BpuPtr)  := io.fromBpu.meta.bits.resolveMeta
     metaQueueCommit(s3BpuPtr)   := io.fromBpu.meta.bits.commitMeta
+
+    // Pair second slot: write only its redirect meta (post-first history view).
+    // Resolve/commit meta is left untouched — second slot training is suppressed.
+    if (EnableTwoTaken) {
+      when(io.fromBpu.meta.bits.isPair.get) {
+        val secondPtr = (io.fromBpu.s3FtqPtr + 1.U).value
+        metaQueueRedirect(secondPtr) := io.fromBpu.meta.bits.secondRedirectMeta.get
+      }
+    }
 
     perfQueue(s3BpuPtr).bpuPerf := io.fromBpu.perfMeta
     perfQueue(s3BpuPtr).isCfi.foreach(_ := false.B)
@@ -339,6 +353,16 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBackend.ftqIdx  := predictionPtr.value
   io.toBackend.startPc := prediction.bits.startPc
 
+  // Pair second entry: write its startPc to the backend pc mem via the second
+  // port (the first port above only covers predictionPtr). Without this the
+  // second slot's pc mem stays stale, so the backend computes a wrong branch PC
+  // and spuriously redirects even when the pair prediction was correct.
+  if (EnableTwoTaken) {
+    io.toBackend.pairWen.get     := pairEnq
+    io.toBackend.pairFtqIdx.get  := (predictionPtr + 1.U).value
+    io.toBackend.pairStartPc.get := prediction.bits.pair.get.secondStartPc
+  }
+
   // --------------------------------------------------------------------------------
   // Redirect from backend and IFU
   // --------------------------------------------------------------------------------
@@ -387,12 +411,23 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   resolveQueue.io.backendResolve := io.fromBackend.resolve
 
-  io.toBpu.train.valid           := resolveQueue.io.bpuTrain.valid
+  // Suppress BPU resolve training for pair second slots: they carry no genuine
+  // lookup-time predictor meta (the second block bypasses S3), so training mBTB/
+  // TAGE/SC/ITTAGE on their stale resolve meta would corrupt the wrong entries.
+  // The resolveQueue entry still dequeues (ready unchanged); only the train
+  // valid to BPU is gated.
+  private val trainFtqIdx     = resolveQueue.io.bpuTrain.bits.ftqIdx.value
+  private val trainIsPairSecond =
+    if (EnableTwoTaken) isPairSecond(trainFtqIdx) else false.B
+  io.toBpu.train.valid           := resolveQueue.io.bpuTrain.valid && !trainIsPairSecond
   resolveQueue.io.bpuTrain.ready := io.toBpu.train.ready
-  io.toBpu.train.bits.meta       := metaQueueResolve(resolveQueue.io.bpuTrain.bits.ftqIdx.value)
+  io.toBpu.train.bits.meta       := metaQueueResolve(trainFtqIdx)
   io.toBpu.train.bits.startPc    := resolveQueue.io.bpuTrain.bits.startPc
   io.toBpu.train.bits.branches   := resolveQueue.io.bpuTrain.bits.branches
-  io.toBpu.train.bits.perfMeta   := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
+  io.toBpu.train.bits.perfMeta   := perfQueue(trainFtqIdx).bpuPerf
+  if (EnableTwoTaken) {
+    XSPerfAccumulate("pairSecondTrainSuppressed", resolveQueue.io.bpuTrain.valid && trainIsPairSecond)
+  }
 
   io.fromBackend.resolve.foreach { branch =>
     val ftqIdx      = branch.bits.ftqIdx.value
