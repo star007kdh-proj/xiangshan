@@ -452,7 +452,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   private val flushTrain = backendRedirect.valid && trainIndexCache > backendRedirect.bits.ftqIdx
 
-  when(flushTrain) {
+  when(backendRedirect.valid &&
+    (trainCache.valid && trainIndexCache > backendRedirect.bits.ftqIdx ||
+      resolveQueue.io.bpuTrain.valid && resolveQueue.io.bpuTrain.bits.ftqIdx > backendRedirect.bits.ftqIdx)) {
     trainCache.valid := false.B
   }.elsewhen(resolveQueue.io.bpuTrain.fire) {
     trainCache.bits.meta     := metaQueueResolve(resolveQueue.io.bpuTrain.bits.ftqIdx.value)
