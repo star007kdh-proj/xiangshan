@@ -41,8 +41,8 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     // pair prediction, present only when EnableTwoTaken
     val pairPrediction: Option[Valid[MicroBtbPairOut]] =
       if (EnableTwoTaken) Option(Output(Valid(new MicroBtbPairOut))) else None
-    // demote a pair entry by its first-branch startPc (backend redirect to second slot)
-    val pairDemote: Option[Valid[PrunedAddr]] =
+    // mispKill: invalidate a pair by its first-branch startPc (backend redirect to second slot)
+    val mispKill: Option[Valid[PrunedAddr]] =
       if (EnableTwoTaken) Option(Input(Valid(PrunedAddr(VAddrBits)))) else None
     // redirect strobe: clears the pairPrev snapshot so no pair chains across a squash
     val redirectValid: Option[Bool] =
@@ -254,6 +254,12 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       // everything matches, and actually taken
       // increase usefulCnt
       t1_updatedEntry.usefulCnt := t1_hitEntry.usefulCnt.getIncrease()
+      // keep slot2 from the live reg (not the forwarded hit entry) so a prior-cycle
+      // kill is not re-validated by this slot1-confirm write-back.
+      if (EnableTwoTaken) {
+        t1_updatedEntry.slot2  := entries(t1_hitIdx).slot2
+        t1_updatedEntry.isPair.foreach(_ := entries(t1_hitIdx).isPair.get)
+      }
     }
   }
 
@@ -311,25 +317,20 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   // cur (slot B candidate) classification
   private val t0_pairBase = t0_pairSeq && t0_slotAOk && t0_promoteEntryHit && t0_entryConsistent
-  // kill: B not-taken or return -> invalidate slot2 immediately
-  private val t0_pairKill =
+  // fastTrainKill: B not-taken, return, call, or indirect -> invalidate slot2
+  private val t0_fastTrainKill =
     if (UseFastTrain && EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.finalPrediction
-      t0_pairBase && (!cur_pred.taken || cur_pred.attribute.hasPop)
-    } else false.B
-  // hold: B is call or indirect -> preserve slot2
-  private val t0_pairHold =
-    if (UseFastTrain && EnableTwoTaken) {
-      val cur_pred = io.fastTrain.get.bits.finalPrediction
-      t0_pairBase && cur_pred.taken && (cur_pred.attribute.hasPush || cur_pred.attribute.isIndirect)
+      val cur_attr = cur_pred.attribute
+      t0_pairBase && (!cur_pred.taken || cur_attr.hasPop || cur_attr.hasPush || cur_attr.isIndirect)
     } else false.B
   // eligible: B is direct-jmp or always-taken-proxy conditional -> alloc/confirm/decay
   private val t0_pairEligible =
     if (UseFastTrain && EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.finalPrediction
-      val a        = cur_pred.attribute
-      t0_pairBase && cur_pred.taken && !a.hasPop && !a.hasPush && !a.isIndirect &&
-        (a.isDirect || a.isConditional)
+      val cur_attr = cur_pred.attribute
+      t0_pairBase && cur_pred.taken && !cur_attr.hasPop && !cur_attr.hasPush && !cur_attr.isIndirect &&
+        (cur_attr.isDirect || cur_attr.isConditional)
     } else false.B
 
   // latch eligible-promotion data into t1
@@ -351,12 +352,22 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
         t0_pairEligible)) else None
 
   // latch kill data into t1
-  private val t1_pairKill    = RegNext(t0_pairKill, init = false.B)
-  private val t1_pairKillIdx = RegEnable(t0_promoteHitIdx, t0_pairKill)
+  private val t1_fastTrainKill    = RegNext(t0_fastTrainKill, init = false.B)
+  private val t1_fastTrainKillIdx = RegEnable(t0_promoteHitIdx, t0_fastTrainKill)
 
   // select the entry: if hit, use the hit entry, otherwise use the victim from replacer (first not useful, or Plru)
   t1_allocate  := !t1_hit && t1_actualTaken
   t1_updateIdx := Mux(t1_hit, t1_hitIdx, replacer.io.victim)
+
+  // mispKill (backend redirect to pair-second): locate the pair-first entry by tag
+  private val t1_mispKillReq   = if (EnableTwoTaken) io.mispKill.get
+                                 else 0.U.asTypeOf(Valid(PrunedAddr(VAddrBits)))
+  private val t1_mispKillTag   = if (EnableTwoTaken) getTag(t1_mispKillReq.bits) else 0.U
+  private val t1_mispKillHitOH = if (EnableTwoTaken)
+    VecInit(entries.map(e => e.valid && e.tag === t1_mispKillTag)).asUInt else 0.U
+  private val t1_mispKillHit   = if (EnableTwoTaken) (t1_mispKillReq.valid && t1_mispKillHitOH.orR) else false.B
+  private val t1_mispKillIdx   = if (EnableTwoTaken) OHToUInt(t1_mispKillHitOH) else 0.U
+
   // and write back the updated entry
   when(t1_fire && (t1_hit || t1_allocate)) { // update entry if hit, or alloc entry only for taken branches
     entries(t1_updateIdx) := t1_updatedEntry
@@ -409,30 +420,25 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       }
     }
 
-    // pair kill: invalidate slot2 of the prev entry on ineligible B; skip on idx aliasing.
-    val t1_killConflict = t1_fire && (t1_hit || t1_allocate) && (t1_pairKillIdx === t1_updateIdx)
-    when(t1_pairKill && !t1_killConflict) {
-      entries(t1_pairKillIdx).isPair.foreach(_ := false.B)
-      entries(t1_pairKillIdx).slot2.valid := false.B
-      entries(t1_pairKillIdx).slot2.confidence.foreach(_ := 0.U)
+    // fastTrainKill: invalidate slot2 of the prev entry on ineligible B. Runs after
+    // the generic write so it wins by last-connect even on idx aliasing.
+    when(t1_fastTrainKill) {
+      entries(t1_fastTrainKillIdx).isPair.foreach(_ := false.B)
+      entries(t1_fastTrainKillIdx).slot2.valid := false.B
+      entries(t1_fastTrainKillIdx).slot2.confidence.foreach(_ := 0.U)
     }
   }
 
-  // pair demote: on a backend redirect to a pair-second entry, invalidate the
-  // matching slot2. Runs after the generic/promotion write-back so demote wins.
+  // mispKill: invalidate the matching slot2. Runs after the generic write so it
+  // wins by last-connect even on idx aliasing.
   if (EnableTwoTaken) {
-    val demoteReq    = io.pairDemote.get
-    val demoteTag    = getTag(demoteReq.bits)
-    val demoteHitOH  = VecInit(entries.map(e => e.valid && e.tag === demoteTag)).asUInt
-    val demoteHit    = demoteReq.valid && demoteHitOH.orR
-    val demoteHitIdx = OHToUInt(demoteHitOH)
-    when(demoteHit) {
-      entries(demoteHitIdx).isPair.foreach(_ := false.B)
-      entries(demoteHitIdx).slot2.valid := false.B
-      entries(demoteHitIdx).slot2.confidence.foreach(_ := 0.U)
+    when(t1_mispKillHit) {
+      entries(t1_mispKillIdx).isPair.foreach(_ := false.B)
+      entries(t1_mispKillIdx).slot2.valid := false.B
+      entries(t1_mispKillIdx).slot2.confidence.foreach(_ := 0.U)
     }
-    XSPerfAccumulate("pairSecondMispHit",  demoteHit)
-    XSPerfAccumulate("pairSecondMispMiss", demoteReq.valid && !demoteHitOH.orR)
+    XSPerfAccumulate("pairSecondMispHit",  t1_mispKillHit)
+    XSPerfAccumulate("pairSecondMispMiss", t1_mispKillReq.valid && !t1_mispKillHitOH.orR)
   }
 
   // update replacer
@@ -485,12 +491,13 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       XSPerfAccumulate("pairSkipFirstIndirect",
         t0_pairSeq && !pairPrev_ft.finalPrediction.attribute.hasPop &&
           pairPrev_ft.finalPrediction.attribute.isIndirect)
-      XSPerfAccumulate("pairKill", t0_pairKill)
-      XSPerfAccumulate("pairKillNoTaken", t0_pairKill && !cur_taken)
-      XSPerfAccumulate("pairKillRet", t0_pairKill && cur_taken && cur_attr.hasPop)
-      XSPerfAccumulate("pairHold", t0_pairHold)
-      XSPerfAccumulate("pairHoldCall", t0_pairHold && cur_attr.hasPush)
-      XSPerfAccumulate("pairHoldIndirect", t0_pairHold && !cur_attr.hasPush && cur_attr.isIndirect)
+      XSPerfAccumulate("pairFastTrainKill", t0_fastTrainKill)
+      XSPerfAccumulate("pairFastTrainKillNoTaken", t0_fastTrainKill && !cur_taken)
+      XSPerfAccumulate("pairFastTrainKillRet", t0_fastTrainKill && cur_taken && cur_attr.hasPop)
+      XSPerfAccumulate("pairFastTrainKillCall",
+        t0_fastTrainKill && cur_taken && !cur_attr.hasPop && cur_attr.hasPush)
+      XSPerfAccumulate("pairFastTrainKillIndirect",
+        t0_fastTrainKill && cur_taken && !cur_attr.hasPop && !cur_attr.hasPush && cur_attr.isIndirect)
       XSPerfAccumulate("pairEligible", t0_pairEligible)
     }
 
@@ -498,12 +505,12 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     XSPerfAccumulate("pairPromote", t1_promote)
     XSPerfAccumulate("pairPromoteConflict",
       t1_promote && t1_fire && (t1_hit || t1_allocate) && (t1_promoteIdx === t1_updateIdx))
-    XSPerfAccumulate("pairKillWriteBack", t1_pairKill)
+    XSPerfAccumulate("pairFastTrainKillApplied", t1_fastTrainKill)
 
-    // generic-path demotion of cur's own pair (slot1 mismatch / not-taken)
-    XSPerfAccumulate("pairDemoteByNotTaken",
+    // firstKill: cur's own pair invalidated because slot1 (first branch) changed
+    XSPerfAccumulate("pairFirstKillNotTaken",
       t1_fire && t1_hit && !t1_actualTaken && t1_hitEntry.isPair.get)
-    XSPerfAccumulate("pairDemoteByMismatch",
+    XSPerfAccumulate("pairFirstKillMismatch",
       t1_fire && t1_hit && t1_actualTaken &&
         (!t1_hitAttributeSame || !t1_hitPositionSame || !t1_hitTargetSame) && t1_hitEntry.isPair.get)
   }

@@ -201,8 +201,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   abtb.io.redirectValid := redirect.valid
   abtb.io.overrideValid := s3_override
 
-  // uBTB pair demote on backend redirect targeting a pair-second FTQ slot.
-  ubtb.io.pairDemote.foreach { p =>
+  // uBTB pair mispKill on backend redirect targeting a pair-second FTQ slot.
+  ubtb.io.mispKill.foreach { p =>
     val isSecond = redirect.bits.isPairSecond.getOrElse(false.B)
     p.valid := redirect.valid && isSecond
     p.bits  := redirect.bits.pairFirstStartPc.getOrElse(0.U.asTypeOf(redirect.bits.cfiPc))
