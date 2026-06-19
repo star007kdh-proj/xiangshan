@@ -96,9 +96,7 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   redirectData.cfiPc   := io.train.redirect.bits.cfiPc
   redirectData.target  := io.train.redirect.bits.target
   redirectData.phrMeta := io.train.redirect.bits.meta.phr
-  // Backend redirect resolves a single FTQ entry; pair-second branch is not
-  // re-shifted here. The meta itself encodes the correct phrPtr (first-slot
-  // pre-update view or second-slot post-first-update view).
+  // redirect resolves a single entry; the meta already encodes the right phrPtr.
   redirectData.pairSecond.foreach(_ := 0.U.asTypeOf(new PhrPairSecond))
 
   s3_override               := io.train.s3_override
@@ -137,15 +135,8 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   updateCfiPc  := updateData.cfiPc
   updateTarget := updateData.target
 
-  /*
-   * Single-update path: phr := (phr << Shamt) ^ hash
-   *
-   * Pair-update path (EnableTwoTaken only): in one cycle, the spec-time PHR
-   * additionally shifts in the second branch's hash (B's hash in lower Shamt
-   * bits, C's hash in upper Shamt bits). The PHR pointer advances by 2*Shamt.
-   * First-entry meta stores phrPtr (pre-pair-fire); second-entry meta stores
-   * (phrPtr - Shamt), i.e. post-first-update — see io.phrMeta below.
-   */
+  // single update: phr := (phr << Shamt) ^ hash. On a pair, also shift in the
+  // second branch's hash in the same cycle and advance ptr by 2*Shamt.
   private val hash      = pathHash(updateCfiPc, updateTarget)
   private val shiftBits = hash(Shamt - 1, 0)
   private val hashHigh  = hash(PathHashWidth - 1, Shamt)
@@ -303,17 +294,12 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   io.phrMeta.phrPtr     := s1_phrPtr
   io.phrMeta.phrLowBits := s1_phrValue(PathHashHighWidth - 1, 0)
   io.phrMeta.predFoldedHist.foreach(_ := s1_foldedPhrReg)
-  // Pair-second meta view: snapshot taken AFTER the first branch's hash has
-  // been shifted in (so phrPtr advanced by Shamt). FTQ writes this view into
-  // the second slot's metaQueueRedirect on pair enqueue, enabling a
-  // self-contained recovery if a backend redirect targets the second slot.
+  // pair-second meta view (post-first: phrPtr advanced by Shamt, L' phrLowBits).
   io.phrMeta.secondPhrPtr.foreach { p =>
     p := s1_phrPtr - Shamt.U
   }
   io.phrMeta.secondPhrLowBits.foreach { p =>
-    // post-first view: L', not the first-slot phrLowBits (which A's high
-    // recombination changes).
-    p := pairLowPrime
+    p := pairLowPrime // post-first L', not the first-slot phrLowBits
   }
   io.phr            := phr
   io.s0_foldedPhr   := s0_foldedPhr

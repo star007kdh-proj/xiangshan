@@ -36,9 +36,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     val s0_commonHR:   CommonHREntry       = Output(new CommonHREntry)
     val s3ResolveMeta: CommonHRResolveMeta = Output(new CommonHRResolveMeta)
 
-    // Post-s3-update ("post-first") ghr & bw, for the pair second FTQ slot's
-    // redirect meta (EnableTwoTaken only). These reflect the commonHR state
-    // *after* the s3 (first-block) update is folded in.
+    // post-first ghr & bw (after the s3 first-block update) for the pair second slot's meta.
     val s3PostGhr: Option[UInt] = if (EnableTwoTaken) Some(Output(UInt(GhrHistoryLength.W))) else None
     val s3PostBw:  Option[UInt] = if (EnableTwoTaken) Some(Output(UInt(BWHistoryLength.W))) else None
 

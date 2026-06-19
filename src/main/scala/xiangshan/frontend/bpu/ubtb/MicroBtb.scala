@@ -41,15 +41,10 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     // pair prediction, present only when EnableTwoTaken
     val pairPrediction: Option[Valid[MicroBtbPairOut]] =
       if (EnableTwoTaken) Option(Output(Valid(new MicroBtbPairOut))) else None
-    /** Demote a pair entry by its first-branch startPc. Asserted by BPU when
-     *  a backend redirect targets the pair's second FTQ entry, signalling that
-     *  the pair's slot2 is misprediction-prone and should be invalidated.
-     */
+    // demote a pair entry by its first-branch startPc (backend redirect to second slot)
     val pairDemote: Option[Valid[PrunedAddr]] =
       if (EnableTwoTaken) Option(Input(Valid(PrunedAddr(VAddrBits)))) else None
-    /** Redirect strobe. Clears the prevS3 (pairPrev) snapshot so we never chain
-     *  a (prev, cur) fastTrain pair across a squash boundary (false learning).
-     */
+    // redirect strobe: clears the pairPrev snapshot so no pair chains across a squash
     val redirectValid: Option[Bool] =
       if (EnableTwoTaken) Option(Input(Bool())) else None
   }
@@ -104,11 +99,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   io.prediction.bits.target      := getFullTarget(s1_startPc, s1_hitEntry.slot1.target, s1_hitEntry.slot1.targetCarry)
   io.prediction.bits.attribute   := s1_hitEntry.slot1.attribute
 
-  /* *** predict stage 1: pair output (EnableTwoTaken only) ***
-   * Combinational pair lookup. Drives BPU top's pair-fire decision.
-   * `second.target` uses `first.target` as its fetch-block base, since the
-   * second fetch-block starts at first.target by construction of the pair.
-   */
+  // pair lookup (combinational): second.target uses first.target as its block base.
   if (EnableTwoTaken) {
     val s1_isPair = s1_hitEntry.isPair.get && s1_hitEntry.slot2.valid
     val pairOut   = Wire(Valid(new MicroBtbPairOut))
@@ -266,29 +257,8 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     }
   }
 
-  /* *** pair learning (EnableTwoTaken only) ***
-   *
-   *  Two consecutive fastTrain cycles (prev = slot A candidate, cur = slot B
-   *  candidate) are paired when they chain (prev.taken && cur.startPc ==
-   *  prev.target). The prev entry (tag(prev.startPc)) is updated per the case
-   *  machine below (see docs/ubtb_pair_gem5_sync_plan.md §3):
-   *
-   *    - PairKill  : ineligible B (B not-taken, or B is a return)
-   *                  -> immediately clear slot2 / isPair / confidence.
-   *    - PairHold  : transient B (call or indirect) -> leave slot2 untouched.
-   *    - eligible  : B is direct-jmp or conditional (alwaysTaken proxy):
-   *        PairAlloc   (no live pair)        : write slot2, conf := 1
-   *        PairConfirm (slot2 content match) : conf := min(conf+1, max)
-   *        PairDecay   (slot2 content differ): conf := conf-1; on reaching 0,
-   *                                            realloc slot2 with conf := 1.
-   *
-   *  call is never learned into slot B (folded into PairHold), per project
-   *  constraint. slot A allows cond / direct-jmp / direct-call; return and
-   *  indirect A are rejected.
-   *
-   *  prevS3 (pairPrev) snapshot is cleared on redirect so a (prev, cur) pair is
-   *  never chained across a squash boundary.
-   */
+  // pair learning: chain two consecutive fastTrain cycles (prev=A, cur=B) and
+  // update prev's entry. snapshot cleared on redirect so no pair chains across a squash.
   private val pairPrev_valid = if (EnableTwoTaken) RegInit(false.B) else WireDefault(false.B)
   private val pairPrev_ft    = if (UseFastTrain && EnableTwoTaken)
     Reg(chiselTypeOf(io.fastTrain.get.bits)) else WireDefault(0.U.asTypeOf(new BpuFastTrain))
@@ -305,7 +275,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     }
   }
 
-  // STEP 1 sequential adjacency: prev taken into cur's start (self-loop excluded).
+  // sequential adjacency: prev taken into cur's start (self-loop excluded).
   private val t0_pairSeq =
     if (UseFastTrain && EnableTwoTaken) {
       val cur       = io.fastTrain.get
@@ -330,7 +300,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   private val t0_promoteEntryHit = if (EnableTwoTaken) t0_promoteHitOH.orR else false.B
   private val t0_promoteHitIdx   = if (EnableTwoTaken) OHToUInt(t0_promoteHitOH) else 0.U
 
-  // C0 entry consistency (tag-aliasing guard): hit entry's slot1 must match prev.
+  // entry consistency (tag-aliasing guard): hit entry's slot1 must match prev.
   private val t0_entryConsistent =
     if (EnableTwoTaken) {
       val e         = entries(t0_promoteHitIdx)
@@ -339,21 +309,21 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       (e.slot1.target === getEntryTarget(prev_pred.target))
     } else false.B
 
-  // STEP 2 cur (slot B candidate) classification
+  // cur (slot B candidate) classification
   private val t0_pairBase = t0_pairSeq && t0_slotAOk && t0_promoteEntryHit && t0_entryConsistent
-  // PairKill: B not-taken (C4) or B is a return (C5) -> immediate invalidate
+  // kill: B not-taken or return -> invalidate slot2 immediately
   private val t0_pairKill =
     if (UseFastTrain && EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.finalPrediction
       t0_pairBase && (!cur_pred.taken || cur_pred.attribute.hasPop)
     } else false.B
-  // PairHold: B is call (project constraint) or indirect (C9) -> preserve slot2
+  // hold: B is call or indirect -> preserve slot2
   private val t0_pairHold =
     if (UseFastTrain && EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.finalPrediction
       t0_pairBase && cur_pred.taken && (cur_pred.attribute.hasPush || cur_pred.attribute.isIndirect)
     } else false.B
-  // eligible: B is direct-jmp or conditional (alwaysTaken proxy) -> Alloc/Confirm/Decay
+  // eligible: B is direct-jmp or always-taken-proxy conditional -> alloc/confirm/decay
   private val t0_pairEligible =
     if (UseFastTrain && EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.finalPrediction
@@ -392,13 +362,8 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     entries(t1_updateIdx) := t1_updatedEntry
   }
 
-  /* *** pair eligible write-back: PairAlloc / PairConfirm / PairDecay ***
-   *
-   *  Applied AFTER the generic update so promotion can re-arm slot2 on entries
-   *  whose slot1 was just refreshed. Skipped when the generic update targets the
-   *  same entry idx (conflict avoidance: generic update invalidates pair on
-   *  mismatch, promotion would otherwise re-arm an entry whose BR1 just changed).
-   */
+  // pair eligible write-back (alloc / confirm / decay), after the generic update;
+  // skipped when it targets the same entry idx as the generic update.
   if (EnableTwoTaken) {
     val t1_promoteConflict = t1_fire && (t1_hit || t1_allocate) && (t1_promoteIdx === t1_updateIdx)
     val target    = entries(t1_promoteIdx)
@@ -408,8 +373,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       (target.slot2.attribute === t1_promoteSlot2Attr) &&
       (target.slot2.target === t1_promoteSlot2Tgt)
     val curConf = target.slot2.confidence.getOrElse(0.U)
-    // PairDecay reaches 0 (then realloc with new content) when prior pair exists,
-    // content mismatches, and current confidence is 1.
+    // decay reaches 0 (then realloc) when a prior pair exists, content differs, conf == 1
     val decayToZero = priorPair && !sameBR2 && (curConf === 1.U)
 
     def writeSlot2Content(idx: UInt): Unit = {
@@ -445,12 +409,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       }
     }
 
-    /* *** pair kill write-back: immediate invalidate on ineligible B ***
-     *  Targets the prev (slot A) entry, normally distinct from the generic
-     *  update entry (cur). Skip on idx aliasing (generic update already governs
-     *  that entry's slot2). t1_promote and t1_pairKill are mutually exclusive
-     *  (derived from mutually exclusive t0 classifications), so no ordering race.
-     */
+    // pair kill: invalidate slot2 of the prev entry on ineligible B; skip on idx aliasing.
     val t1_killConflict = t1_fire && (t1_hit || t1_allocate) && (t1_pairKillIdx === t1_updateIdx)
     when(t1_pairKill && !t1_killConflict) {
       entries(t1_pairKillIdx).isPair.foreach(_ := false.B)
@@ -459,14 +418,8 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     }
   }
 
-  /* *** pair demote write-back (A4, EnableTwoTaken only) ***
-   *
-   *  When BPU forwards a backend redirect that targeted a pair-second FTQ
-   *  entry, the corresponding pair-first uBTB entry has an unreliable slot2.
-   *  Locate it by tag(startPc) and invalidate slot2 + isPair + confidence.
-   *  Last-connect ordering: this runs AFTER the generic / promotion write-back
-   *  so demote wins on the same cycle.
-   */
+  // pair demote: on a backend redirect to a pair-second entry, invalidate the
+  // matching slot2. Runs after the generic/promotion write-back so demote wins.
   if (EnableTwoTaken) {
     val demoteReq    = io.pairDemote.get
     val demoteTag    = getTag(demoteReq.bits)
@@ -478,8 +431,8 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       entries(demoteHitIdx).slot2.valid := false.B
       entries(demoteHitIdx).slot2.confidence.foreach(_ := 0.U)
     }
-    XSPerfAccumulate("pairDemoteOnMispred", demoteHit)
-    XSPerfAccumulate("pairDemoteMiss",      demoteReq.valid && !demoteHitOH.orR)
+    XSPerfAccumulate("pairSecondMispHit",  demoteHit)
+    XSPerfAccumulate("pairSecondMispMiss", demoteReq.valid && !demoteHitOH.orR)
   }
 
   // update replacer
@@ -511,19 +464,19 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     )
   )
 
-  /* *** pair perf (EnableTwoTaken only) — aligned with gem5 stat names *** */
+  // pair perf counters
   if (EnableTwoTaken) {
     val s1_pairValid = io.pairPrediction.get.valid
     XSPerfAccumulate("pairLookupHit", s1_pairValid && s1_fire)
     XSPerfAccumulate("pairLookupHitAtThreshold",
       s1_pairValid && s1_fire && (io.pairPrediction.get.bits.confidence >= PairConfThreshold.U))
 
-    // chain detection (STEP 1) + case machine (STEP 2) — fastTrain dependent
+    // chain detection + classification (fastTrain dependent)
     if (UseFastTrain) {
       val cur_attr = io.fastTrain.get.bits.finalPrediction.attribute
       val cur_taken = io.fastTrain.get.bits.finalPrediction.taken
-      XSPerfAccumulate("pairSeqOk", t0_pairSeq)
-      XSPerfAccumulate("pairSeqBroken",
+      XSPerfAccumulate("pairChainFound", t0_pairSeq)
+      XSPerfAccumulate("pairChainBroken",
         pairPrev_valid && io.fastTrain.get.valid && io.enable &&
           pairPrev_ft.finalPrediction.taken && !t0_pairSeq)
       XSPerfAccumulate("pairSkipEntryMismatch",

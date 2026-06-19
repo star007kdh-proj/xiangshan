@@ -46,8 +46,8 @@ case class BpuParameters(
     // since the pair second bypasses S3) must be near-certainly taken to emit.
     PairConfWidth:     Int = 2,
     PairConfThreshold: Int = 3,
-    // Pair fires only when fewer than this many blocks are un-prefetched (prefetch
-    // caught up -> downstream hungry). 0 = gate off. cf. gem5 pairOnlyWhenFtqBelow.
+    // Pair fires only when fewer than this many blocks are un-prefetched
+    // (prefetch caught up -> downstream hungry). 0 = gate off.
     PairPrefetchHungryDist: Int = 0,
     // history
     phrParameters:      PhrParameters = PhrParameters(),

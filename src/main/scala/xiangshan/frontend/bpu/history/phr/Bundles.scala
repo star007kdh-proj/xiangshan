@@ -92,11 +92,7 @@ class PhrMeta(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
   val phrPtr:     PhrPtr = new PhrPtr
   val phrLowBits: UInt   = UInt(PathHashHighWidth.W)
 
-  // When EnableTwoTaken, the pair-second FTQ slot replays from a phrPtr
-  // already advanced by `Shamt` (i.e. with the first branch's hash applied).
-  // FTQ writes this view into the second slot's metaQueueRedirect on pair
-  // enqueue, so a backend redirect targeting the second slot recovers from
-  // a self-contained snapshot.
+  // post-first view (phrPtr advanced by Shamt) for the pair-second slot's redirect meta.
   val secondPhrPtr:     Option[PhrPtr] = if (EnableTwoTaken) Option(new PhrPtr) else None
   val secondPhrLowBits: Option[UInt]   = if (EnableTwoTaken) Option(UInt(PathHashHighWidth.W)) else None
 

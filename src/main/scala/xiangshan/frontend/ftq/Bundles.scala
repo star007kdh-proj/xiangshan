@@ -78,9 +78,7 @@ class FtqToCtrlIO(implicit p: Parameters) extends FtqBundle {
   val ftqIdx:  UInt       = Output(UInt(FtqPtr.width.W))
   val startPc: PrunedAddr = Output(PrunedAddr(VAddrBits))
 
-  // Second write port for a pair enqueue (EnableTwoTaken only). A pair writes two
-  // FTQ entries in one cycle, so the backend pc mem needs both their startPcs;
-  // the single `wen`/`ftqIdx`/`startPc` port only covers the first entry.
+  // second pc mem write port for a pair enqueue (the port above covers only the first entry).
   private val enableTwoTaken: Boolean = p(XSCoreParamsKey).frontendParameters.bpuParameters.EnableTwoTaken
   val pairWen:     Option[Bool]       = if (enableTwoTaken) Some(Output(Bool())) else None
   val pairFtqIdx:  Option[UInt]       = if (enableTwoTaken) Some(Output(UInt(FtqPtr.width.W))) else None

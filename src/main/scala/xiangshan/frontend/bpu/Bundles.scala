@@ -189,21 +189,14 @@ class BpuCtrl extends Bundle {
   val rasEnable:    Bool = Bool()
 }
 
-/** Second-entry payload of a pair enqueue (BPU -> FTQ).
- *  Present only when `EnableTwoTaken`. When `valid`, FTQ pushes two entries
- *  in a single cycle (`bpuPtr += 2`) with this bundle describing the second
- *  entry's start / takenCfiOffset / target.
- */
+// second-entry payload of a pair enqueue (BPU -> FTQ); when valid FTQ pushes two entries.
 class BpuPairSecond(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
-  /** Pair enqueue is active. */
   val valid: Bool = Bool()
-  /** Second entry's start PC (= first entry's target). */
+  // second entry's start PC (= first entry's target)
   val secondStartPc: PrunedAddr = PrunedAddr(VAddrBits)
-  /** Second entry's final target (= pair second branch's target). */
+  // second entry's final target
   val secondTarget: PrunedAddr = PrunedAddr(VAddrBits)
-  /** Second entry's takenCfiOffset. `.valid` is always true for a live pair
-   *  (the pair is always 2-taken).
-   */
+  // second entry's takenCfiOffset (valid always true for a live pair)
   val secondCfiOffset: Valid[UInt] = Valid(UInt(CfiPositionWidth.W))
 }
 
@@ -236,9 +229,7 @@ class BpuRedirect(implicit p: Parameters) extends BpuBundle {
   val attribute: BranchAttribute = new BranchAttribute
   val meta:      BpuRedirectMeta = new BpuRedirectMeta
 
-  // Pair second mispred markers (EnableTwoTaken only). When true, the redirect
-  // is targeting the second slot of a uBTB pair dispatch; pairFirstStartPc
-  // identifies the first FTQ entry's startPc for uBTB demote lookup.
+  // pair-second mispred markers: redirect targets a pair second slot; pairFirstStartPc for uBTB demote.
   val isPairSecond:     Option[Bool]       = if (EnableTwoTaken) Option(Bool()) else None
   val pairFirstStartPc: Option[PrunedAddr] = if (EnableTwoTaken) Option(PrunedAddr(VAddrBits)) else None
 }
@@ -331,12 +322,8 @@ class BpuMeta(implicit p: Parameters) extends BpuBundle {
   val resolveMeta:  BpuResolveMeta  = new BpuResolveMeta
   val commitMeta:   BpuCommitMeta   = new BpuCommitMeta
 
-  /** Pair second slot meta (EnableTwoTaken only). When `isPair`, FTQ writes
-   *  `secondRedirectMeta` into the second FTQ slot's metaQueueRedirect so a
-   *  backend redirect targeting that slot recovers speculative history from the
-   *  post-first ("before second") view instead of stale data. Resolve/commit
-   *  meta is NOT provided for the second slot — its training is suppressed.
-   */
+  // pair second slot meta: when isPair, FTQ writes secondRedirectMeta (post-first
+  // history view) to the second slot. No resolve/commit meta (training suppressed).
   val isPair:             Option[Bool]            = if (EnableTwoTaken) Some(Bool()) else None
   val secondRedirectMeta: Option[BpuRedirectMeta] = if (EnableTwoTaken) Some(new BpuRedirectMeta) else None
 }

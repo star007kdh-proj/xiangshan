@@ -100,13 +100,10 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // metaQueueRedirect stores speculation information needed by BPU when redirect happens.
   private val metaQueueRedirect = Reg(Vec(FtqSize, new BpuRedirectMeta))
 
-  // Pair-tracking sidecar (EnableTwoTaken only). isPairFirst marks the first
-  // FTQ slot of a pair enqueue; pairFirstStartPc remembers the first entry's
-  // startPc so a redirect targeting the second slot can demote the uBTB pair.
+  // pair-tracking sidecar: first slot marker + its startPc (for uBTB demote),
+  // and second slot marker (its resolve training is suppressed).
   private val isPairFirst       = RegInit(VecInit.fill(FtqSize)(false.B))
   private val pairFirstStartPc  = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
-  // isPairSecond marks the second slot of a pair enqueue; its BPU resolve
-  // training is suppressed (no genuine lookup-time meta exists for it).
   private val isPairSecond      = RegInit(VecInit.fill(FtqSize)(false.B))
 
   // metaQueue stores information needed to train BPU.
@@ -177,11 +174,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.unprefetchedBlockNum.foreach(_ := RegNext(distanceBetween(bpuPtr(0), pfPtr(0))))
   private val bpuEnqueue = prediction.fire && !redirect.valid
 
-  /** Pair enqueue from BPU. When true, two entries are pushed in the same
-   *  cycle (`bpuPtr += 2`) and the second slot is populated from
-   *  `prediction.bits.pair.get`. Mutually exclusive with `s3Override` by
-   *  construction (BPU does not assert `pair.valid` on override path).
-   */
+  // pair enqueue: push two entries this cycle (bpuPtr += 2). Mutually exclusive with s3Override.
   private val pairEnq: Bool =
     prediction.bits.pair.map(_.valid).getOrElse(false.B) && bpuEnqueue
 
@@ -198,10 +191,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   )
 
   when(prediction.bits.s3Override) {
-    // s3Override squashes any earlier pair second sitting at (s3FtqPtr + 1).
-    // The ptr roll-back makes (s3FtqPtr + 1) the next write target; the next
-    // cycle's prediction will overwrite that slot with fresh data, and the
-    // IFU/PF flush below catches any in-flight fetch on the squashed slot.
+    // roll back past any pair second at (s3FtqPtr + 1); next prediction overwrites it.
     bpuPtr := io.fromBpu.s3FtqPtr + 1.U
   }.elsewhen(pairEnq) {
     bpuPtr := bpuPtr + 2.U
@@ -218,9 +208,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
       entryQueue(secondPtr.value).startPc        := p.secondStartPc
       entryQueue(secondPtr.value).takenCfiOffset := p.secondCfiOffset
     }
-    // Pair sidecar: mark this slot as pair-first iff pair enqueue this cycle.
-    // s3 override and single enqueue both clear the flag (defensive — second
-    // slot's flag also clears so next enqueue starts clean).
+    // pair sidecar markers; any enqueue to a slot clears its second flag.
     if (EnableTwoTaken) {
       isPairFirst(predictionPtr.value)  := pairEnq
       isPairSecond(predictionPtr.value) := false.B // any enqueue to a slot clears its second flag
@@ -238,8 +226,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     metaQueueResolve(s3BpuPtr)  := io.fromBpu.meta.bits.resolveMeta
     metaQueueCommit(s3BpuPtr)   := io.fromBpu.meta.bits.commitMeta
 
-    // Pair second slot: write only its redirect meta (post-first history view).
-    // Resolve/commit meta is left untouched — second slot training is suppressed.
+    // pair second slot: write only its redirect meta (resolve/commit suppressed).
     if (EnableTwoTaken) {
       when(io.fromBpu.meta.bits.isPair.get) {
         val secondPtr = (io.fromBpu.s3FtqPtr + 1.U).value
@@ -356,10 +343,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBackend.ftqIdx  := predictionPtr.value
   io.toBackend.startPc := prediction.bits.startPc
 
-  // Pair second entry: write its startPc to the backend pc mem via the second
-  // port (the first port above only covers predictionPtr). Without this the
-  // second slot's pc mem stays stale, so the backend computes a wrong branch PC
-  // and spuriously redirects even when the pair prediction was correct.
+  // pair second entry: write its startPc to the backend pc mem via the second port
+  // (the first port only covers predictionPtr; otherwise its pc mem stays stale).
   if (EnableTwoTaken) {
     io.toBackend.pairWen.get     := pairEnq
     io.toBackend.pairFtqIdx.get  := (predictionPtr + 1.U).value
@@ -393,9 +378,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.redirect.bits.meta      := metaQueueRedirect(redirect.bits.ftqIdx.value)
   io.toBpu.redirectFromIFU         := ifuRedirect.valid
 
-  // Pair second mispred markers (EnableTwoTaken). Identify by checking whether
-  // the prior FTQ slot was marked pair-first; carry the first entry's startPc
-  // so BPU can issue a uBTB pair demote.
+  // pair-second mispred markers: prior slot is pair-first; carry its startPc for uBTB demote.
   io.toBpu.redirect.bits.isPairSecond.foreach { p =>
     val prevIdx = (redirect.bits.ftqIdx - 1.U).value
     p := redirect.valid && isPairFirst(prevIdx)
@@ -414,11 +397,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   resolveQueue.io.backendResolve := io.fromBackend.resolve
 
-  // Suppress BPU resolve training for pair second slots: they carry no genuine
-  // lookup-time predictor meta (the second block bypasses S3), so training mBTB/
-  // TAGE/SC/ITTAGE on their stale resolve meta would corrupt the wrong entries.
-  // The resolveQueue entry still dequeues (ready unchanged); only the train
-  // valid to BPU is gated.
+  // suppress resolve training for pair second slots (stale meta); ready unchanged so it still dequeues.
   private val trainFtqIdx     = resolveQueue.io.bpuTrain.bits.ftqIdx.value
   private val trainIsPairSecond =
     if (EnableTwoTaken) isPairSecond(trainFtqIdx) else false.B

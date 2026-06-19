@@ -101,8 +101,7 @@ class CtrlBlockImp(
   val rename = Module(new Rename)
   val redirectGen = Module(new RedirectGenerator)
   private def hasRen: Boolean = true
-  // With uBTB 2-taken, a pair enqueues two FTQ entries in one cycle, so the pc mem
-  // needs a second write port to store the second entry's startPc.
+  // 2-taken pair enqueues two FTQ entries per cycle, so the pc mem needs a second write port.
   private val enableTwoTaken: Boolean = coreParams.frontendParameters.bpuParameters.EnableTwoTaken
   private val numPcMemWrite:  Int     = if (enableTwoTaken) 2 else 1
   private val pcMem =
