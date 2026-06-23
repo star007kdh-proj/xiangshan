@@ -226,17 +226,20 @@ class Ftq(implicit p: Parameters) extends FtqModule
     metaQueueResolve(s3BpuPtr)  := io.fromBpu.meta.bits.resolveMeta
     metaQueueCommit(s3BpuPtr)   := io.fromBpu.meta.bits.commitMeta
 
-    // pair second slot: write only its redirect meta (resolve/commit suppressed).
-    if (EnableTwoTaken) {
-      when(io.fromBpu.meta.bits.isPair.get) {
-        val secondPtr = (io.fromBpu.s3FtqPtr + 1.U).value
-        metaQueueRedirect(secondPtr) := io.fromBpu.meta.bits.secondRedirectMeta.get
-      }
-    }
-
     perfQueue(s3BpuPtr).bpuPerf := io.fromBpu.perfMeta
     perfQueue(s3BpuPtr).isCfi.foreach(_ := false.B)
     perfQueue(s3BpuPtr).mispredict := false.B
+
+    // pair second slot: redirect + perf meta only (resolve/commit suppressed).
+    if (EnableTwoTaken) {
+      when(io.fromBpu.meta.bits.isPair.get) {
+        val secondPtr = (io.fromBpu.s3FtqPtr + 1.U).value
+        metaQueueRedirect(secondPtr)    := io.fromBpu.meta.bits.secondRedirectMeta.get
+        perfQueue(secondPtr).bpuPerf    := io.fromBpu.meta.bits.secondPerfMeta.get
+        perfQueue(secondPtr).isCfi.foreach(_ := false.B)
+        perfQueue(secondPtr).mispredict := false.B
+      }
+    }
   }
 
   resolveQueue.io.bpuEnqueue    := bpuEnqueue

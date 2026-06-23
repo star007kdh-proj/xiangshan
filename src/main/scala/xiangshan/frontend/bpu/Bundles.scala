@@ -322,10 +322,10 @@ class BpuMeta(implicit p: Parameters) extends BpuBundle {
   val resolveMeta:  BpuResolveMeta  = new BpuResolveMeta
   val commitMeta:   BpuCommitMeta   = new BpuCommitMeta
 
-  // pair second slot meta: when isPair, FTQ writes secondRedirectMeta (post-first
-  // history view) to the second slot. No resolve/commit meta (training suppressed).
+  // pair second slot meta (redirect + perf for branch B); resolve/commit suppressed.
   val isPair:             Option[Bool]            = if (EnableTwoTaken) Some(Bool()) else None
   val secondRedirectMeta: Option[BpuRedirectMeta] = if (EnableTwoTaken) Some(new BpuRedirectMeta) else None
+  val secondPerfMeta:     Option[BpuPerfMeta]     = if (EnableTwoTaken) Some(new BpuPerfMeta) else None
 }
 
 /* *** internal const & type *** */

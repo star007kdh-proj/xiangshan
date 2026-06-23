@@ -641,6 +641,26 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_perfMeta.scUsed              := s3_scUsed.asUInt
 
   io.toFtq.perfMeta := s3_perfMeta
+
+  // 2-taken: branch B perf meta (uBTB-sourced, no override; mbtbMeta/scUsed left zero).
+  if (EnableTwoTaken) {
+    val s2_pairSecondPred    = RegEnable(s1_ubtbPair.bits.second, s1_fire)
+    val s3_pairSecondPred    = RegEnable(s2_pairSecondPred, s2_fire)
+    val s2_pairSecondStartPc = RegEnable(s1_ubtbPair.bits.first.target, s1_fire)
+    val s3_pairSecondStartPc = RegEnable(s2_pairSecondStartPc, s2_fire)
+
+    val s3_secondPerfMeta = Wire(new BpuPerfMeta)
+    s3_secondPerfMeta                     := 0.U.asTypeOf(new BpuPerfMeta)
+    s3_secondPerfMeta.bpId                := debug_bpId
+    s3_secondPerfMeta.startPc             := s3_pairSecondStartPc
+    s3_secondPerfMeta.s1Prediction        := s3_pairSecondPred
+    s3_secondPerfMeta.s3Prediction        := s3_pairSecondPred
+    s3_secondPerfMeta.bpSource.s1Source   := BpuPredictionSource.Stage1.Ubtb
+    s3_secondPerfMeta.bpSource.s3Source   := BpuPredictionSource.Stage3.Fallthrough
+    s3_secondPerfMeta.bpSource.s3Override := false.B
+    io.toFtq.meta.bits.secondPerfMeta.get := s3_secondPerfMeta
+  }
+
   // TODO: override reason and redirect reason
   io.toFtq.topdownReasons := 0.U.asTypeOf(new FrontendTopDownBundle())
 
