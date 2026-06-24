@@ -43,5 +43,5 @@ trait HasMicroBtbParameters extends HasBpuParameters {
   def UseFastTrain:    Boolean = ubtbParameters.UseFastTrain
   def EnableTargetFix: Boolean = ubtbParameters.EnableTargetFix
 
-  // PairConfWidth / PairConfThreshold / PairConfMax inherited from HasBpuParameters.
+  // PairConfWidth / PairDirectConfThreshold / PairCondConfThreshold / PairConfMax inherited from HasBpuParameters.
 }

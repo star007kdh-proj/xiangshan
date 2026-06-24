@@ -105,6 +105,6 @@ class MicroBtbPairOut(implicit p: Parameters) extends MicroBtbBundle {
   /** Whether the lookup yields a usable pair (entry hit AND slot2 valid). */
   val isPair: Bool = Bool()
 
-  /** Pair confidence (saturating); BPU gates emit on `>= PairConfThreshold`. */
+  /** Pair confidence (saturating); BPU emit gate uses an attribute-dependent threshold. */
   val confidence: UInt = UInt(PairConfWidth.W)
 }

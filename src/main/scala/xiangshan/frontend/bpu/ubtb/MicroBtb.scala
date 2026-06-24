@@ -474,8 +474,16 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   if (EnableTwoTaken) {
     val s1_pairValid = io.pairPrediction.get.valid
     XSPerfAccumulate("pairLookupHit", s1_pairValid && s1_fire)
-    XSPerfAccumulate("pairLookupHitAtThreshold",
-      s1_pairValid && s1_fire && (io.pairPrediction.get.bits.confidence >= PairConfThreshold.U))
+    XSPerfAccumulate(
+      "pairLookupHitAtThreshold",
+      s1_pairValid && s1_fire &&
+        (io.pairPrediction.get.bits.confidence >=
+          Mux(
+            io.pairPrediction.get.bits.second.attribute.isConditional,
+            PairCondConfThreshold.U,
+            PairDirectConfThreshold.U
+          ))
+    )
 
     // chain detection + classification (fastTrain dependent)
     if (UseFastTrain) {

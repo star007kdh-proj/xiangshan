@@ -40,12 +40,11 @@ case class BpuParameters(
     // When false, all 2-taken logic is compile-time stripped and generated Verilog
     // is identical to the baseline. Must be enabled together across uBTB/PHR.
     EnableTwoTaken: Boolean = false,
-    // Pair confidence counter (2-bit saturating). Pair emit requires
-    // confidence >= PairConfThreshold. Shared across uBTB/BPU. Default 3 (saturated):
-    // a slot B branch (esp. a conditional, which has no downstream TAGE/SC correction
-    // since the pair second bypasses S3) must be near-certainly taken to emit.
-    PairConfWidth:     Int = 2,
-    PairConfThreshold: Int = 3,
+    // Pair confidence counter (saturating). Emit requires confidence >= an
+    // attribute-dependent threshold: conditional slot B needs more than direct.
+    PairConfWidth:           Int = 3,
+    PairDirectConfThreshold: Int = 2,
+    PairCondConfThreshold:   Int = 6,
     // Pair fires only when fewer than this many blocks are un-prefetched
     // (prefetch caught up -> downstream hungry). 0 = gate off.
     PairPrefetchHungryDist: Int = 0,
@@ -70,10 +69,11 @@ trait HasBpuParameters extends HasFrontendParameters {
   def EnableTwoTaken: Boolean = bpuParameters.EnableTwoTaken
 
   // Pair confidence parameters (master location; uBTB/BPU all reference here).
-  def PairConfWidth:         Int = bpuParameters.PairConfWidth
-  def PairConfThreshold:     Int = bpuParameters.PairConfThreshold
-  def PairPrefetchHungryDist: Int = bpuParameters.PairPrefetchHungryDist
-  def PairConfMax:       Int = (1 << PairConfWidth) - 1
+  def PairConfWidth:           Int = bpuParameters.PairConfWidth
+  def PairDirectConfThreshold: Int = bpuParameters.PairDirectConfThreshold
+  def PairCondConfThreshold:   Int = bpuParameters.PairCondConfThreshold
+  def PairPrefetchHungryDist:  Int = bpuParameters.PairPrefetchHungryDist
+  def PairConfMax:             Int = (1 << PairConfWidth) - 1
 
   // general
   def FetchBlockSizeWidth:    Int = log2Ceil(FetchBlockSize)
