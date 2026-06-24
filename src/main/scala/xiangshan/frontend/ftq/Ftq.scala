@@ -202,14 +202,14 @@ class Ftq(implicit p: Parameters) extends FtqModule
   when((prediction.fire || bpuS3Redirect) && !redirect.valid) {
     entryQueue(predictionPtr.value).startPc        := prediction.bits.startPc
     entryQueue(predictionPtr.value).takenCfiOffset := prediction.bits.takenCfiOffset
-    when(pairEnq) {
-      val p         = prediction.bits.pair.get
-      val secondPtr = predictionPtr + 1.U
-      entryQueue(secondPtr.value).startPc        := p.secondStartPc
-      entryQueue(secondPtr.value).takenCfiOffset := p.secondCfiOffset
-    }
-    // pair sidecar markers; any enqueue to a slot clears its second flag.
+    // pair second entry + sidecar markers; any enqueue to a slot clears its second flag.
     if (EnableTwoTaken) {
+      when(pairEnq) {
+        val p         = prediction.bits.pair.get
+        val secondPtr = predictionPtr + 1.U
+        entryQueue(secondPtr.value).startPc        := p.secondStartPc
+        entryQueue(secondPtr.value).takenCfiOffset := p.secondCfiOffset
+      }
       isPairFirst(predictionPtr.value)  := pairEnq
       isPairSecond(predictionPtr.value) := false.B // any enqueue to a slot clears its second flag
       when(pairEnq) {

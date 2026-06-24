@@ -491,8 +491,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     else false.B
   private val s1_lastPairFire = RegNext(s1_pairFire, init = false.B)
   s1_abtbValidEffective := s1_abtbValid && !(EnableTwoTaken.B && s1_lastPairFire)
-  dontTouch(s1_pairFire)
-  dontTouch(s1_lastPairFire)
+  if (EnableTwoTaken) {
+    dontTouch(s1_pairFire)
+    dontTouch(s1_lastPairFire)
+  }
 
   // used for meta enqueue and s3 override
   private val s2_ftqPtr = RegEnable(io.fromFtq.bpuPtr, s1_fire)
