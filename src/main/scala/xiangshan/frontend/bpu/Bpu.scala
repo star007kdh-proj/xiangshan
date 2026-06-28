@@ -306,10 +306,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s1_abtbResult       := s1_abtbFirstTakenBr.bits
   s1_abtbResult.taken := s1_abtbFirstTakenBrOH.reduce(_ || _)
 
+  // ABTB suppressed for one cycle after a pair fire; declared early so the pair decision and PHR feed share it.
+  private val s1_abtbValidEffective = Wire(Bool())
+
   // S1-predictor / pair-first agreement: same position + target + attribute.
   // TODO(timing): this compare feeds s1_usePair -> s0_startPc / FTQ payload.
   private val abtbUbtbAgree = if (EnableTwoTaken)
-    s1_abtbValid && s1_abtbResult.taken &&
+    s1_abtbValidEffective && s1_abtbResult.taken &&
       (s1_abtbResult.cfiPosition === s1_ubtbPair.bits.first.cfiPosition) &&
       (s1_abtbResult.target      === s1_ubtbPair.bits.first.target) &&
       (s1_abtbResult.attribute   === s1_ubtbPair.bits.first.attribute)
@@ -326,7 +329,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     else 0.U
 
   private val s1_usePair = if (EnableTwoTaken)
-    (!s1_abtbValid || abtbUbtbAgree) &&
+    (!s1_abtbValidEffective || abtbUbtbAgree) &&
       s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
       s1_pairFetchHungry &&
       // confidence emit gate (attribute-dependent threshold)
@@ -340,10 +343,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       !s1_ubtbPair.bits.second.attribute.hasPush &&
       !s1_ubtbPair.bits.second.attribute.hasPop
     else false.B
-
-  // Will be assigned after s1_lastPairFire is declared (see io.toFtq.prediction below).
-  // Forward-declare here so subsequent Mux refers to it consistently.
-  private val s1_abtbValidEffective = Wire(Bool())
 
   s1_prediction := Mux(
     s1_abtbValidEffective,
@@ -719,7 +718,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("pairFireWhileS1PredInvalid", s1_pairFire && !s1_abtbValid)
     XSPerfAccumulate("pairFireWhileS1PredAgrees",  s1_pairFire && abtbUbtbAgree)
     XSPerfAccumulate("pairBlockedByS1Pred",
-      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && s1_abtbValid && !abtbUbtbAgree)
+      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && s1_abtbValidEffective && !abtbUbtbAgree)
     XSPerfAccumulate("pairBlockedByConf",
       s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
         (s1_ubtbPair.bits.confidence < s1_pairConfThreshold))
