@@ -36,8 +36,13 @@
 | 4 | a28cd38ff | 3d2767184 | fix(ftq): remove bypass from redirect to prefetch | follow-up | ✅적용 → [doc](04-ftq-followups.md) |
 | 5 | 3a49b46e0 | 99618d92a | feat(ftq): read queue w/ redirect FTQ idx 1cyc ahead | follow-up | ✅적용 → [doc](04-ftq-followups.md) |
 | 6 | 637f62a88 | 337f6ec52 | fix(ftq): fix train cache flush condition | follow-up | ✅적용 → [doc](04-ftq-followups.md) |
+| 7 | fdc671fc2 | 90839b385 | fix(ifu): exception signal not deferred (#5874) | uncache prereq(빌드중) | ✅적용 → [doc](06-uncache-mmio-mechanism.md) |
+| 8 | 512397494 | 90748e6e0 | fix(backend,ctrlblock): export empty state (#5787) | uncache prereq(빌드중) | ✅적용 → [doc](06-uncache-mmio-mechanism.md) |
+| 9 | 09d715b21 | d8c790a37 | fix(Ifu,InstrUncache): needResend (#5959) | uncache prereq(빌드중) | ✅적용 → [doc](06-uncache-mmio-mechanism.md) |
+| — | (adapt) | a8e885e5c | drop spurious import LoadStage.s0 | merge-fix | ✅ |
 
 > follow-up 시간순: 7be11a171 → a28cd38ff → 3a49b46e0 → (core) → 637f62a88. 앞 3개는 core 조상이라 net 보정.
+> #7~9는 빌드 중 발견된 uncache 서브시스템 정렬(MMIO 메커니즘 `mmioCommitRead`→`emptyAfter` 교체). Ifu는 ours 유지.
 
 > 선행 후보 6개(e3b045a1c 등)는 #1에서 편입 불필요로 확인됨(충돌 import 1건뿐).
 > `806ccd8c5`(topdown)는 신 perf-info 모델 리팩터 체인을 전제로 해 단독 적용 불가 → Path B로 스킵하고 core의 topdown 배선을 구 모델로 적응함.
