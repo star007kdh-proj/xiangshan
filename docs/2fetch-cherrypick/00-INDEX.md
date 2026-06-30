@@ -29,13 +29,15 @@
 | # | commit | local | 설명 | 분류 | 상태 |
 |---|--------|-------|------|------|------|
 | 1 | cfe100e29 | 55d58856f | feat(ICache): 2-prefetch (#5775) | prereq | ✅적용·빌드검증대기 → [doc](01-cfe100e29-2prefetch.md) |
-| 2 | 7c29456a9 | — | feat(Frontend): implement 2-fetch | **core** | 대기 |
+| — | 806ccd8c5 | — | fix(frontend): backend redirect topdown override | ~~prereq~~ | ❌**스킵**(Path B) → [decision](02-topdown-decision.md) |
+| 2 | 7c29456a9 | 977ef629d | feat(Frontend): implement 2-fetch | **core** | ✅적용·빌드검증대기 → [doc](03-7c29456a9-implement-2fetch.md) |
 | 3 | 3a49b46e0 | — | feat(ftq): read queue w/ redirect FTQ idx 1cyc ahead | follow-up | 대기 |
 | 4 | a28cd38ff | — | fix(ftq): remove bypass from redirect to prefetch | follow-up | 대기 |
 | 5 | 7be11a171 | — | fix(ftq): flush train cache with redirect | follow-up | 대기 |
 | 6 | 637f62a88 | — | fix(ftq): fix train cache flush condition | follow-up | 대기 |
 
 > 선행 후보 6개(e3b045a1c 등)는 #1에서 편입 불필요로 확인됨(충돌 import 1건뿐).
+> `806ccd8c5`(topdown)는 신 perf-info 모델 리팩터 체인을 전제로 해 단독 적용 불가 → Path B로 스킵하고 core의 topdown 배선을 구 모델로 적응함.
 
 ## 빌드/검증 방식
 
