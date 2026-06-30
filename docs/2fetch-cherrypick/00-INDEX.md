@@ -26,15 +26,21 @@
 
 ## 후보 최소 집합 (가설, 의존성 순)
 
-| # | commit | 설명 | 분류 | 상태 |
-|---|--------|------|------|------|
-| 0 | (TBD) | 2-prefetch 선행 prereq (충돌 시 편입) | prereq | 미정 |
-| 1 | cfe100e29 | feat(ICache): 2-prefetch (#5775) | prereq | 대기 |
-| 2 | 7c29456a9 | feat(Frontend): implement 2-fetch | **core** | 대기 |
-| 3 | 3a49b46e0 | feat(ftq): read queue w/ redirect FTQ idx 1cyc ahead | follow-up | 대기 |
-| 4 | a28cd38ff | fix(ftq): remove bypass from redirect to prefetch | follow-up | 대기 |
-| 5 | 7be11a171 | fix(ftq): flush train cache with redirect | follow-up | 대기 |
-| 6 | 637f62a88 | fix(ftq): fix train cache flush condition | follow-up | 대기 |
+| # | commit | local | 설명 | 분류 | 상태 |
+|---|--------|-------|------|------|------|
+| 1 | cfe100e29 | 55d58856f | feat(ICache): 2-prefetch (#5775) | prereq | ✅적용·빌드검증대기 → [doc](01-cfe100e29-2prefetch.md) |
+| 2 | 7c29456a9 | — | feat(Frontend): implement 2-fetch | **core** | 대기 |
+| 3 | 3a49b46e0 | — | feat(ftq): read queue w/ redirect FTQ idx 1cyc ahead | follow-up | 대기 |
+| 4 | a28cd38ff | — | fix(ftq): remove bypass from redirect to prefetch | follow-up | 대기 |
+| 5 | 7be11a171 | — | fix(ftq): flush train cache with redirect | follow-up | 대기 |
+| 6 | 637f62a88 | — | fix(ftq): fix train cache flush condition | follow-up | 대기 |
+
+> 선행 후보 6개(e3b045a1c 등)는 #1에서 편입 불필요로 확인됨(충돌 import 1건뿐).
+
+## 빌드/검증 방식
+
+mill·java가 로컬(Git Bash/MSYS)에 없어 **사용자가 직접 빌드/perf 측정**한다.
+각 마일스톤에서 작업을 멈추고 사용자 검증 결과를 받아 다음 커밋으로 진행한다.
 
 > 집합은 cherry-pick 진행 중 충돌/컴파일 결과에 따라 prereq를 추가하며 갱신한다.
 
