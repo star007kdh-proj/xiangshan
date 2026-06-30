@@ -44,7 +44,6 @@ import xiangshan.frontend.PrunedAddrInit
 import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.frontend.ibuffer.IBufPtr
 import xiangshan.frontend.icache.PmpCheckBundle
-import xiangshan.mem.LoadStage.s0
 
 class Ifu(implicit p: Parameters) extends IfuModule
     with PreDecodeHelper
