@@ -28,6 +28,7 @@
 
 | # | commit | local | 설명 | 분류 | 상태 |
 |---|--------|-------|------|------|------|
+| 0 | 33995fbb9 | 0652aa894 | fix(utils): fix one hot check condition (#5726) | prereq(빌드중 발견) | ✅적용 → [doc](05-enumuint-onehot-fix.md) |
 | 1 | cfe100e29 | 55d58856f | feat(ICache): 2-prefetch (#5775) | prereq | ✅적용·빌드검증대기 → [doc](01-cfe100e29-2prefetch.md) |
 | — | 806ccd8c5 | — | fix(frontend): backend redirect topdown override | ~~prereq~~ | ❌**스킵**(Path B) → [decision](02-topdown-decision.md) |
 | 2 | 7c29456a9 | 977ef629d | feat(Frontend): implement 2-fetch | **core** | ✅적용·빌드검증대기 → [doc](03-7c29456a9-implement-2fetch.md) |
