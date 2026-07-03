@@ -430,8 +430,8 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s2_pdInfoVec     = Wire(Vec(IBufferEnqueueWidth, new PreDecodeInfo))
   private val s2_jumpOffsetVec = Wire(Vec(IBufferEnqueueWidth, PrunedAddr(VAddrBits)))
   s2_expandedInstrVec.zipWithIndex.foreach { case (instr, i) =>
-    val jalOffset = getJalOffset(instr.data, instr.isRvc)
-    val brOffset  = getBrOffset(instr.data, instr.isRvc)
+    val jalOffset = getJalOffset(instr.data, false.B)
+    val brOffset  = getBrOffset(instr.data, false.B)
     s2_pdInfoVec(i).valid       := instr.valid
     s2_pdInfoVec(i).isRVC       := instr.isRvc
     s2_pdInfoVec(i).brAttribute := BranchAttribute.decode(instr.data, instr.valid && s2_valid)
