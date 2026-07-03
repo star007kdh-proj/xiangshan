@@ -345,7 +345,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     Wire(new FtqFetchReq).fromFtqEntry(entryQueue(fetchPtr(1).value))
   )
 
-  private val rawTwoFetchValid = distanceBetween(bpuPtr(0), fetchPtr(0)) > 3.U &&
+  private val rawTwoFetchValid = distanceBetween(bpuPtr(0), fetchPtr(0)) > bpuToPfSafeDist &&
     (fetchReq(0).size +& fetchReq(1).size) <= FetchBlockInstNum.U && // the unit of fetchReq size is half-word
     fetchReq(0).vPageNumber === fetchReq(1).vPageNumber &&
     !(backendException.hasException && (
@@ -741,7 +741,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     "2fetch_fail_reason",
     io.toICache.toWayLookup.fire && !io.fromICache.fromWayLookup.realTwoFetchValid,
     Seq(
-      ("fb_not_enough", distanceBetween(bpuPtr(0), fetchPtr(0)) <= 3.U),
+      ("fb_not_enough", distanceBetween(bpuPtr(0), fetchPtr(0)) <= bpuToPfSafeDist),
       ("fb1_exception", backendException.hasException && backendExceptionPtr === fetchPtr(0)),
       ("fb2_exception", backendException.hasException && backendExceptionPtr === fetchPtr(1)),
       ("total_size", (fetchReq(0).size +& fetchReq(1).size) > FetchBlockInstNum.U),
