@@ -301,7 +301,20 @@ class Ftq(implicit p: Parameters) extends FtqModule
     Wire(new FtqPrefetchReq).fromFtqEntry(entryQueue(pfPtr(1).value))
   )
 
-  private val bpuToPfSafeDist = if (EnableTwoTaken) 5.U else 3.U
+  // enqueue number of the predictions currently in bpu s1/s2/s3 (0 if bubble or flushed)
+  private val bpuS1EnqNum = Mux(pairEnq, 2.U, Mux(bpuEnqueue, 1.U, 0.U))
+  private val bpuS2EnqNum = RegInit(0.U(2.W))
+  private val bpuS3EnqNum = RegInit(0.U(2.W))
+  when(redirect.valid || bpuS3Redirect) {
+    bpuS2EnqNum := 0.U
+    bpuS3EnqNum := 0.U
+  }.otherwise {
+    bpuS2EnqNum := bpuS1EnqNum
+    bpuS3EnqNum := bpuS2EnqNum
+  }
+
+  // exact reach of any future s3 override: bpuPtr - bpuS2EnqNum - bpuS3EnqNum
+  private val bpuToPfSafeDist = 1.U +& bpuS2EnqNum +& bpuS3EnqNum
 
   private val canTwoPrefetch =
     // magic number 3: to simplify ICache/Ifu bpuFlush logic, we ask the second fetch block to be flushed within Ftq,
