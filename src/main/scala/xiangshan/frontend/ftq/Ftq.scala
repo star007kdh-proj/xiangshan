@@ -302,6 +302,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
     Wire(new FtqPrefetchReq).fromFtqEntry(entryQueue(pfPtr(1).value))
   )
 
+  private val bpuToPfSafeDist = if (EnableTwoTaken) 5.U else 3.U
+
   private val canTwoPrefetch =
     // magic number 3: to simplify ICache/Ifu bpuFlush logic, we ask the second fetch block to be flushed within Ftq,
     // i.e. the following 2-prefetch (fb0/1) is safe, as fb1 had passed bpu s3 (which is the last chance of override).
@@ -314,7 +316,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     //      bpu s1    s2    s3
     // Therefore, we check if distanceBetween(bpuPtr(0), pfPtr(0)) (i.e. bpuPtr - pfPtr) > 3
     // NOTE: this is not portable, if we change the stage count of Bpu, we need to change this too
-    distanceBetween(bpuPtr(0), pfPtr(0)) > 3.U &&
+    distanceBetween(bpuPtr(0), pfPtr(0)) > bpuToPfSafeDist &&
       // they also need to be on the same page, to prevent extra itlb port
       prefetchReq(0).vPageNumber === prefetchReq(1).vPageNumber &&
       // and they cannot have known exception, otherwise we'll prefetch on the wrong path
@@ -693,7 +695,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     "2prefetch_fail_reason",
     io.toICache.toPrefetch.fire && !io.toICache.toPrefetch.bits.twoPrefetchCase.valid,
     Seq(
-      ("fb_not_enough", distanceBetween(bpuPtr(0), pfPtr(0)) <= 3.U),
+      ("fb_not_enough", distanceBetween(bpuPtr(0), pfPtr(0)) <= bpuToPfSafeDist),
       ("fb1_exception", backendException.hasException && backendExceptionPtr === pfPtr(0)),
       ("fb2_exception", backendException.hasException && backendExceptionPtr === pfPtr(1)),
       ("page_conflict", prefetchReq(0).vPageNumber =/= prefetchReq(1).vPageNumber),
