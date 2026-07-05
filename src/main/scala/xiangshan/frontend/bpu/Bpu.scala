@@ -495,6 +495,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     dontTouch(s1_lastPairFire)
   }
 
+  // post-pair-fire meta is indexed by the pair-first block; drop it so ABTB skips training.
+  private val s2_abtbMetaSkip = if (EnableTwoTaken) RegEnable(s1_lastPairFire, s1_fire) else false.B
+  private val s3_abtbMetaSkip = if (EnableTwoTaken) RegEnable(s2_abtbMetaSkip, s2_fire) else false.B
+  when(s3_abtbMetaSkip) {
+    fastTrain.bits.abtbMeta.valid := false.B
+  }
+
   // used for meta enqueue and s3 override
   private val s2_ftqPtr = RegEnable(io.fromFtq.bpuPtr, s1_fire)
   private val s3_ftqPtr = RegEnable(s2_ftqPtr, s2_fire)
@@ -727,6 +734,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("pairBlockedByS3Override",
       s1_usePair && s3_override && io.toFtq.prediction.fire)
     XSPerfAccumulate("s1PredSuppressedByPair", s1_lastPairFire && s1_abtbValid)
+    XSPerfAccumulate("abtbTrainDroppedPairSkipMeta",
+      fastTrain.valid && fastTrain.bits.finalPrediction.taken && s3_abtbMetaSkip && s3_abtbMeta.valid)
     XSPerfAccumulate("pairFireToFtq",
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
     // slot-A-call pairs: second-slot RAS meta is approximated; track frequency.
