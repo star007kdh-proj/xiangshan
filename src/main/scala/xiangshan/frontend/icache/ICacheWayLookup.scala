@@ -192,8 +192,14 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   private val hasMmio          = fetchReqEntry.map(_.isMmio).reduce(_ || _)
   private val hasItlbException = exceptionHit.reduce(_ || _)
 
+  // demote a same-cycle 2-fetch read if only its second block is hit by bpu s3 flush,
+  // so that readPtr / ftq fetchPtr / mainPipe req(1) stay consistent
+  private val fetchSecondFlushed =
+    io.flushFromBpu.shouldFlushByStage3(fetchReq(1).ftqIdx, fetchReq(1).valid) &&
+      !io.flushFromBpu.shouldFlushByStage3(fetchReq(0).ftqIdx, fetchReq(0).valid)
+
   private val realTwoFetchValid = fetchReq(1).valid && canDeqSecond &&
-    !isDataSramReadConflict && !hasMmio && !hasItlbException
+    !isDataSramReadConflict && !hasMmio && !hasItlbException && !fetchSecondFlushed
 
   io.toFtq.realTwoFetchValid         := realTwoFetchValid
   io.toFtq.perf_canNotServeTwoMeta   := !canDeqSecond
