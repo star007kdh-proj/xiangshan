@@ -511,20 +511,34 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s2_usePair = if (EnableTwoTaken) RegEnable(s1_usePair, s1_fire) else false.B
   private val s3_usePair = if (EnableTwoTaken) RegEnable(s2_usePair, s2_fire) else false.B
 
+  // pair second branch view (cond / backward) for commonHR ghr/bw/imli updates
+  private val s1_pairSecondIsCond = if (EnableTwoTaken)
+    s1_ubtbPair.bits.second.attribute.isConditional
+    else false.B
+  private val s1_pairSecondBwTaken = if (EnableTwoTaken)
+    getCfiPcFromPosition(s1_ubtbPair.bits.first.target, s1_ubtbPair.bits.second.cfiPosition).addr >
+      s1_ubtbPair.bits.second.target.addr
+    else false.B
+  private val s2_pairSecondIsCond  = if (EnableTwoTaken) RegEnable(s1_pairSecondIsCond, s1_fire) else false.B
+  private val s3_pairSecondIsCond  = if (EnableTwoTaken) RegEnable(s2_pairSecondIsCond, s2_fire) else false.B
+  private val s2_pairSecondBwTaken = if (EnableTwoTaken) RegEnable(s1_pairSecondBwTaken, s1_fire) else false.B
+  private val s3_pairSecondBwTaken = if (EnableTwoTaken) RegEnable(s2_pairSecondBwTaken, s2_fire) else false.B
+
   io.toFtq.meta.valid             := s3_valid
   io.toFtq.meta.bits.redirectMeta := s3_redirectMeta
   io.toFtq.meta.bits.resolveMeta  := s3_resolveMeta
   io.toFtq.meta.bits.commitMeta   := s3_commitMeta
 
   // pair second slot redirect meta (post-first view): PHR from secondPhrPtr,
-  // commonHR post-first ghr/bw with empty descriptors, RAS copied from first.
+  // commonHR post-first ghr/bw/imli with empty descriptors, RAS copied from first.
   if (EnableTwoTaken) {
     val s3_secondRedirectMeta = Wire(new BpuRedirectMeta)
     s3_secondRedirectMeta := s3_redirectMeta // RAS + defaults copied from first
     s3_secondRedirectMeta.phr.phrPtr     := s3_phrMeta.secondPhrPtr.get
     s3_secondRedirectMeta.phr.phrLowBits := s3_phrMeta.secondPhrLowBits.get
-    s3_secondRedirectMeta.commonHRMeta.ghr := commonHR.io.s3PostGhr.get
-    s3_secondRedirectMeta.commonHRMeta.bw  := commonHR.io.s3PostBw.get
+    s3_secondRedirectMeta.commonHRMeta.ghr  := commonHR.io.s3PostGhr.get
+    s3_secondRedirectMeta.commonHRMeta.bw   := commonHR.io.s3PostBw.get
+    s3_secondRedirectMeta.commonHRMeta.imli := commonHR.io.s3PostImli.get
     s3_secondRedirectMeta.commonHRMeta.hitMask.foreach(_ := false.B)
     io.toFtq.meta.bits.isPair.get             := s3_usePair && !s3_override
     io.toFtq.meta.bits.secondRedirectMeta.get := s3_secondRedirectMeta
@@ -599,6 +613,16 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   commonHR.io.redirect.taken          := redirect.bits.taken
   commonHR.io.redirect.attribute      := redirect.bits.attribute
   commonHR.io.redirect.meta           := redirect.bits.meta.commonHRMeta
+
+  // pair second branch feed: same gates as the PHR pair shift (s1) and the isPair meta (s3)
+  if (EnableTwoTaken) {
+    commonHR.io.s1_pairSecondValid.get := s1_usePair && !s3_override
+    commonHR.io.s1_pairSecondImliTaken.get :=
+      s1_usePair && !s3_override && s1_pairSecondIsCond && s1_pairSecondBwTaken
+    commonHR.io.s3_pairSecondValid.get   := s3_usePair && !s3_override
+    commonHR.io.s3_pairSecondIsCond.get  := s3_pairSecondIsCond
+    commonHR.io.s3_pairSecondBwTaken.get := s3_pairSecondBwTaken
+  }
 
   // Power-on reset
   private val powerOnResetState = RegInit(true.B)
@@ -736,6 +760,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("s1PredSuppressedByPair", s1_lastPairFire && s1_abtbValid)
     XSPerfAccumulate("abtbTrainDroppedPairSkipMeta",
       fastTrain.valid && fastTrain.bits.finalPrediction.taken && s3_abtbMetaSkip && s3_abtbMeta.valid)
+    XSPerfAccumulate("commonHRPairSecondShift", s3_fire && s3_usePair && !s3_override)
     XSPerfAccumulate("pairFireToFtq",
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
     // slot-A-call pairs: second-slot RAS meta is approximated; track frequency.
