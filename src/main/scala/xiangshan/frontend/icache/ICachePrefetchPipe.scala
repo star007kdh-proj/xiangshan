@@ -27,6 +27,7 @@ import xiangshan.cache.mmu.TlbCmd
 import xiangshan.cache.mmu.TlbRequestIO
 import xiangshan.cache.mmu.ValidHoldBypass
 import xiangshan.frontend.ExceptionType
+import xiangshan.frontend.TwoPrefetchCase
 import xiangshan.frontend.ftq.BpuFlushInfo
 import xiangshan.frontend.ftq.FtqToPrefetchBundle
 
@@ -65,10 +66,11 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   private val (toMiss, fromMiss) = (io.missReq, io.missResp)
   private val toWayLookup        = io.wayLookupWrite
 
-  private val s0_fire, s1_fire, s2_fire      = WireInit(false.B)
-  private val s1_ready, s2_ready             = WireInit(false.B)
-  private val s0_flush, s1_flush, s2_flush   = WireInit(false.B)
-  private val fromBpuS0Flush, fromBpuS1Flush = WireInit(false.B)
+  private val s0_fire, s1_fire, s2_fire                  = WireInit(false.B)
+  private val s1_ready, s2_ready                         = WireInit(false.B)
+  private val s0_flush, s1_flush, s2_flush               = WireInit(false.B)
+  private val fromBpuS0Flush, fromBpuS1Flush             = WireInit(false.B)
+  private val fromBpuS0FlushSecond, fromBpuS1FlushSecond = WireInit(false.B)
 
   /**
     ******************************************************************************
@@ -89,13 +91,23 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   private val s0_ftqIdx           = s0_req(0).ftqIdx
   private val s0_isSoftPrefetch   = s0_req(0).isSoftPrefetch
   private val s0_backendException = s0_req(0).backendException
-  private val s0_twoPrefetchCase  = io.fromFtq.bits.twoPrefetchCase
+  // demote to 1-prefetch (including meta read pattern) if only the second block is hit by bpu s3 flush
+  private val s0_twoPrefetchCase = Mux(
+    fromBpuS0FlushSecond,
+    TwoPrefetchCase.Conflict,
+    io.fromFtq.bits.twoPrefetchCase
+  )
 
   private val s0_readMetaVAddr  = s0_twoPrefetchCase.selectMetaVAddr(s0_req)
   private val s0_readMetaSetIdx = VecInit(s0_readMetaVAddr.map(get_idx))
   private val s0_readDoubleLine = s0_twoPrefetchCase.selectIsCrossLine(s0_req)
 
   fromBpuS0Flush := !s0_isSoftPrefetch && io.flushFromBpu.shouldFlushByStage3(s0_ftqIdx, s0_valid)
+  fromBpuS0FlushSecond := !s0_isSoftPrefetch && !fromBpuS0Flush &&
+    io.flushFromBpu.shouldFlushByStage3(
+      s0_req(1).ftqIdx,
+      s0_valid && io.fromFtq.bits.twoPrefetchCase.valid
+    )
   s0_flush       := io.flush || fromBpuS0Flush || s1_flush
 
   io.fromFtq.ready := s1_ready && toItlb.ready && toMeta.ready && !s0_flush
@@ -122,6 +134,16 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   private val s1_readMetaVAddr   = RegEnable(s0_readMetaVAddr, s0_fire)
   private val s1_readMetaSetIdx  = RegEnable(s0_readMetaSetIdx, s0_fire)
   private val s1_readDoubleLine  = RegEnable(s0_readDoubleLine, s0_fire)
+
+  // second-block flush is a 1-cycle pulse but the request may stay in s1 for several cycles, hold it
+  private val s1_secondFlushed = RegInit(false.B)
+  when(s0_fire) {
+    s1_secondFlushed := false.B
+  }.elsewhen(fromBpuS1FlushSecond) {
+    s1_secondFlushed := true.B
+  }
+  // keep s1_twoPrefetchCase itself for meta info mapping, only suppress second-block side effects
+  private val s1_twoPrefetchValid = s1_twoPrefetchCase.valid && !fromBpuS1FlushSecond && !s1_secondFlushed
 
   private def nS1FsmState: Int = 5
   private object S1FsmState extends EnumUInt(nS1FsmState) {
@@ -303,7 +325,7 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
         // do not send soft prefetch to waylookup/mainpipe, as it does not affect control flow
         !s1_isSoftPrefetch &&
         // first port is always valid, the second port is valid only if we can do 2-prefetch
-        (if (i == 0) true.B else s1_twoPrefetchCase.valid)
+        (if (i == 0) true.B else s1_twoPrefetchValid)
 
     port.bits.ftqIdx            := s1_req(i).ftqIdx
     port.bits.entry.vSetIdx     := VecInit(get_idx(s1_req(i).startVAddr), get_idx(s1_req(i).nextLineVAddr))
@@ -362,7 +384,7 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   io.toFtq.bits.twoFetchInfo(0).valid        := true.B
   io.toFtq.bits.twoFetchInfo(0).bits.isMmio  := s1_isMmio
   io.toFtq.bits.twoFetchInfo(0).bits.wayMask := VecInit(s1_reqMetaInfo(0).map(_.waymask))
-  io.toFtq.bits.twoFetchInfo(1).valid        := s1_twoPrefetchCase.valid
+  io.toFtq.bits.twoFetchInfo(1).valid        := s1_twoPrefetchValid
   io.toFtq.bits.twoFetchInfo(1).bits.isMmio  := s1_isMmio
   io.toFtq.bits.twoFetchInfo(1).bits.wayMask := VecInit(s1_reqMetaInfo(1).map(_.waymask))
 
@@ -420,7 +442,9 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
 
   /** Stage 1 control */
   fromBpuS1Flush := !s1_isSoftPrefetch && io.flushFromBpu.shouldFlushByStage3(s1_ftqIdx, s1_valid)
-  s1_flush       := io.flush || fromBpuS1Flush
+  fromBpuS1FlushSecond := !s1_isSoftPrefetch && !fromBpuS1Flush &&
+    io.flushFromBpu.shouldFlushByStage3(s1_req(1).ftqIdx, s1_valid && s1_twoPrefetchCase.valid)
+  s1_flush := io.flush || fromBpuS1Flush
   // when s1 is flushed, itlb pipeline should also be flushed
   io.itlbFlushPipe := s1_flush
 
@@ -515,6 +539,8 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
   // the number of bpu flush
   XSPerfAccumulate("bpuS0Flush", fromBpuS0Flush)
   XSPerfAccumulate("bpuS1Flush", fromBpuS1Flush)
+  XSPerfAccumulate("bpuS0FlushSecond", fromBpuS0FlushSecond)
+  XSPerfAccumulate("bpuS1FlushSecond", fromBpuS1FlushSecond)
   // the number of prefetch request received from ftq or backend (software prefetch)
   XSPerfAccumulate("hwReq", io.fromFtq.fire && !io.fromFtq.bits.req(0).isSoftPrefetch) // FIXME
   XSPerfAccumulate("swReq", io.fromFtq.fire && io.fromFtq.bits.req(0).isSoftPrefetch)
