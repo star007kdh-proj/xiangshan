@@ -108,11 +108,21 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s0_exceptionInfo  = VecInit(io.fromWayLookup.bits.wayLookupInfo.map(_.exceptionEntry))
   private val s0_wayMask        = VecInit(s0_wayLookupEntry.map(_.waymask))
 
-  s0_flush := io.flush || io.flushFromBpu.shouldFlushByStage3(s0_ftqIdx, s0_valid)
+  private val s0_flushFromBpu = io.flushFromBpu.shouldFlushByStage3(s0_ftqIdx, s0_valid)
+  // demote to 1-fetch if only the second block is hit by bpu s3 flush
+  private val s0_flushFromBpuSecond = !s0_flushFromBpu &&
+    io.flushFromBpu.shouldFlushByStage3(s0_req(1).ftqIdx, s0_valid && s0_req(1).valid)
+
+  s0_flush := io.flush || s0_flushFromBpu
 
   io.fromWayLookup.ready := toData.ready && s1_ready && !s0_flush
 
   s0_fire := io.fromWayLookup.fire
+
+  private val s0_reqDemoted = WireDefault(s0_req)
+  when(s0_flushFromBpuSecond) {
+    s0_reqDemoted(1).valid := false.B
+  }
 
   /**
     ******************************************************************************
@@ -122,7 +132,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   toData.valid := s0_valid && s1_ready && !s0_flush
   toData.bits.zipWithIndex.foreach { case (readReq, i) =>
-    readReq.valid        := s0_req(i).valid
+    readReq.valid        := s0_reqDemoted(i).valid
     readReq.bits.bankSel := s0_req(i).bankSel
     readReq.bits.waymask := s0_wayMask(i)
     readReq.bits.vSetIdx := s0_req(i).vSetIdx
@@ -137,7 +147,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
    * - response to Ifu
    */
   private val s1_valid          = ValidHold(s0_fire, s1_fire, s1_flush)
-  private val s1_req            = RegEnable(s0_req, s0_fire)
+  private val s1_req            = RegEnable(s0_reqDemoted, s0_fire)
   private val s1_wayLookupEntry = RegEnable(s0_wayLookupEntry, s0_fire)
   private val s1_exceptionInfo  = RegEnable(s0_exceptionInfo, s0_fire)
 
@@ -145,6 +155,15 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   private val s1_pTag   = s1_wayLookupEntry(0).pTag
   private val s1_ftqIdx = s1_req(0).ftqIdx
+
+  private val s1_flushFromBpu = io.flushFromBpu.shouldFlushByStage3(s1_ftqIdx, s1_valid)
+  // demote to 1-fetch if only the second block is hit by bpu s3 flush; clear the register so that
+  // the demotion persists while the request stays in s1
+  private val s1_flushFromBpuSecond = !s1_flushFromBpu &&
+    io.flushFromBpu.shouldFlushByStage3(s1_req(1).ftqIdx, s1_valid && s1_req(1).valid)
+  when(s1_flushFromBpuSecond && !s0_fire) {
+    s1_req(1).valid := false.B
+  }
 
   // the offset of the start pc within the cache line
   private val s1_offset = VecInit(s1_req.map(_.startVAddr(blockOffBits - 1, 0)))
@@ -420,7 +439,8 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   io.toIfu.req.valid := s1_valid && s1_fetchFinish && !s1_flush
   io.toIfu.req.bits.zipWithIndex.foreach { case (req, i) =>
-    req.valid            := s1_req(i).valid
+    // gate combinationally so that a same-cycle second-block flush does not leak to ifu
+    req.valid            := s1_req(i).valid && (if (i == 0) true.B else !s1_flushFromBpuSecond)
     req.startVAddr       := s1_req(i).startVAddr
     req.ftqIdx           := s1_req(i).ftqIdx
     req.takenCfiOffset   := s1_req(i).takenCfiOffset
@@ -438,9 +458,12 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     req.icacheMeta.pAddr              := getPAddrFromPTag(s1_vAddr(2 * i), s1_pTag)
     req.icacheMeta.gpAddr             := s1_exceptionInfo(i).gpAddr
   }
-  s1_flush := io.flush || io.flushFromBpu.shouldFlushByStage3(s1_ftqIdx, s1_valid)
+  s1_flush := io.flush || s1_flushFromBpu
   s1_ready := (s1_fetchFinish && io.toIfu.req.ready) || !s1_valid
   s1_fire  := s1_valid && s1_fetchFinish && io.toIfu.req.ready && !s1_flush
+
+  XSPerfAccumulate("bpuS0FlushSecond", s0_flushFromBpuSecond)
+  XSPerfAccumulate("bpuS1FlushSecond", s1_flushFromBpuSecond)
 
   /* *** perf *** */
   // when fired, tell ifu raw hit state of each cache line
