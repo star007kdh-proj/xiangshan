@@ -25,6 +25,7 @@ import utility.PerfCCT
 import utility.UIntToMask
 import utility.ValidHold
 import utility.XORFold
+import utility.XSError
 import utility.XSPerfAccumulate
 import xiangshan.FrontendTdataDistributeIO
 import xiangshan.cache.mmu.HasTlbConst
@@ -137,6 +138,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s0_icacheMeta = VecInit(io.fromICache.req.bits.map(_.icacheMeta))
 
   s0_flushFromBpu := fromFtq.flushFromBpu.shouldFlushByStage3(s0_fetchBlock(0).ftqIdx, s0_valid)
+  // second-block-only bpu s3 flush: drop the second block and demote to a single-block fetch
+  private val s0_flushFromBpuSecond = !s0_flushFromBpu &&
+    fromFtq.flushFromBpu.shouldFlushByStage3(s0_fetchBlock(1).ftqIdx, s0_valid && s0_fetchBlock(1).valid)
 
   private val s0_prevEndIsHalfRvi = RegInit(false.B)
 
@@ -165,20 +169,23 @@ class Ifu(implicit p: Parameters) extends IfuModule
   )
   dontTouch(s0_invalidTaken)
 
+  // drop the second block if the first block's taken is invalid, or if it is hit by a bpu s3 flush
+  private val s0_dropSecondBlock = s0_invalidTaken(0) || s0_flushFromBpuSecond
+
   private val s0_fixedFetchBlock = WireDefault(s0_fetchBlock)
-  when(s0_invalidTaken(0)) {
+  when(s0_dropSecondBlock) {
     s0_fixedFetchBlock(1).valid := false.B
   }
 
   dontTouch(s0_fixedFetchBlock)
 
-  private val s0_fixedTotalEndPos       = Mux(s0_invalidTaken(0), s0_fetchBlock(0).takenCfiOffset.bits, s0_totalEndPos)
-  private val s0_fixedTotalEndIsHalfRvi = Mux(s0_invalidTaken(0), s0_firstEndIsHalfRvi, s0_totalEndIsHalfRvi)
-  private val s0_fixedInvalidTaken      = VecInit(s0_invalidTaken(0), s0_invalidTaken(1) && !s0_invalidTaken(0))
+  private val s0_fixedTotalEndPos       = Mux(s0_dropSecondBlock, s0_fetchBlock(0).takenCfiOffset.bits, s0_totalEndPos)
+  private val s0_fixedTotalEndIsHalfRvi = Mux(s0_dropSecondBlock, s0_firstEndIsHalfRvi, s0_totalEndIsHalfRvi)
+  private val s0_fixedInvalidTaken      = VecInit(s0_invalidTaken(0), s0_invalidTaken(1) && !s0_dropSecondBlock)
 
   private val s0_fixedRawInstrVec = WireDefault(s0_rawInstrVec)
   s0_fixedRawInstrVec.foreach { instr =>
-    when(s0_invalidTaken(0) && instr.blockSel) {
+    when(s0_dropSecondBlock && instr.blockSel) {
       instr.valid := false.B
     }
   }
@@ -252,6 +259,15 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_instrCount   = RegEnable(s0_realInstrCount, s0_fire)
 
   dontTouch(s1_fetchBlock)
+
+  // by construction a second-block-only bpu s3 flush can reach at most ifu s0 (same cycle as icache mainPipe s1),
+  // anything deeper means the timing assumption is broken
+  XSError(
+    s1_valid && s1_fetchBlock(1).valid &&
+      fromFtq.flushFromBpu.shouldFlushByStage3(s1_fetchBlock(1).ftqIdx, true.B) &&
+      !fromFtq.flushFromBpu.shouldFlushByStage3(s1_fetchBlock(0).ftqIdx, true.B),
+    "second-block-only bpu s3 flush reached ifu s1\n"
+  )
 
   private val s1_prevIBufEnqPtr     = RegInit(0.U.asTypeOf(new IBufPtr))
   private val s1_prevEndIsHalfRvi   = RegEnable(s0_prevEndIsHalfRvi, s0_fire)
