@@ -64,7 +64,8 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   private val readPtr  = RegInit(ICacheWayLookupPtr(false.B, 0.U))
   private val writePtr = RegInit(ICacheWayLookupPtr(false.B, 0.U))
 
-  private val tailFtqIdx = RegInit(0.U.asTypeOf(new FtqPtr))
+  // ftqIdx of the last written (up to 2, in case of a 2-prefetch write) entries, (0) is the newest
+  private val tailFtqIdxVec = RegInit(VecInit(Seq.fill(2)(0.U.asTypeOf(new FtqPtr))))
 
   private val empty = readPtr === writePtr
 
@@ -74,24 +75,31 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   dontTouch(numFreeEntries)
 
   // NOTE: May be unportable, we have bp3 == pf2 now, and WayLookup is written in pf1,
-  // so the tailing 0 (already bypassed to if1) or 1 (if1 stall, stored here) entries might be flushed by bp3,
-  // therefore, when shouldFlushByStage3, we need to move back writePtr by 0 (empty) or 1.
+  // so only the tailing (up to 2, in case of a 2-prefetch write) entries might be flushed by bp3,
+  // therefore, when shouldFlushByStage3 hits them, move back writePtr by the number of hit tail entries (0/1/2).
   // If in future we have bp4 (or even more) flush, this might not be enough.
-  // NOTE: With 2-prefetch, writePtr - 2.U still does not need to be flushed,
-  // as we ask the second fetch block to be flushed within Ftq. Refer to `canTwoPrefetch` condition in `class Ftq`
-  private val bpuS3FlushValid = io.flushFromBpu.shouldFlushByStage3(tailFtqIdx, true.B)
-  private val bpuS3FlushPtr   = writePtr - 1.U
+  private val bpuS3FlushVec = VecInit(
+    io.flushFromBpu.shouldFlushByStage3(tailFtqIdxVec(0), numValidEntries >= 1.U),
+    io.flushFromBpu.shouldFlushByStage3(tailFtqIdxVec(1), numValidEntries >= 2.U)
+  )
+  private val bpuS3FlushCnt = PopCount(bpuS3FlushVec)
 
   when(io.flush) {
     writePtr.value := 0.U
     writePtr.flag  := false.B
-  }.elsewhen(bpuS3FlushValid && !empty) {
-    writePtr := bpuS3FlushPtr
+  }.elsewhen(bpuS3FlushCnt =/= 0.U) {
+    writePtr := writePtr - bpuS3FlushCnt
   }.elsewhen(io.write.head.fire) {
     // FetchPorts must be 1 or 2, and last.fire is depend on head.fire
     val enqCnt = Mux(io.write.last.fire, FetchPorts.U, 1.U)
     writePtr := writePtr + enqCnt
   }
+  // a write firing in the same cycle as a tail flush must have been flushed/demoted in the prefetch pipe,
+  // otherwise the entry data would be written at the pre-rollback position and get lost
+  XSError(
+    bpuS3FlushCnt =/= 0.U && io.write.head.fire,
+    "WayLookup write fires in the same cycle as a bp3 tail flush\n"
+  )
 
   when(io.flush) {
     readPtr.value := 0.U
@@ -101,10 +109,18 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   }
 
   when(io.flush) {
-    tailFtqIdx.value := 0.U
-    tailFtqIdx.flag  := false.B
+    tailFtqIdxVec.foreach { tail =>
+      tail.value := 0.U
+      tail.flag  := false.B
+    }
   }.elsewhen(io.write.head.fire) {
-    tailFtqIdx := Mux(io.write.last.fire, io.write.last.bits.ftqIdx, io.write.head.bits.ftqIdx)
+    when(io.write.last.fire) {
+      tailFtqIdxVec(0) := io.write.last.bits.ftqIdx
+      tailFtqIdxVec(1) := io.write.head.bits.ftqIdx
+    }.otherwise {
+      tailFtqIdxVec(0) := io.write.head.bits.ftqIdx
+      tailFtqIdxVec(1) := tailFtqIdxVec(0)
+    }
   }
 
   // we can store only the first exception encountered, as exceptions must trigger a redirection (and thus a flush)
@@ -114,7 +130,10 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     exceptionPtr === (readPtr + i.U) && exceptionEntry.valid
   })
 
-  when(io.flush || bpuS3FlushValid && exceptionPtr === bpuS3FlushPtr) {
+  private val exceptionBpuS3Flushed =
+    bpuS3FlushVec(0) && exceptionPtr === (writePtr - 1.U) ||
+      bpuS3FlushVec(1) && exceptionPtr === (writePtr - 2.U)
+  when(io.flush || exceptionBpuS3Flushed) {
     // When flushed by bp3
     // we don't need to reset exceptionEntry/Ptr to save power
     exceptionEntry.valid := false.B
