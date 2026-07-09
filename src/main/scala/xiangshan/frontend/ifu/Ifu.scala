@@ -653,7 +653,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
     io.toIBuffer.bits.pc(s2_alignShiftNum)                    := uncachePc
     io.toIBuffer.bits.isRvc(s2_alignShiftNum)                 := uncacheIsRvc
-    io.toIBuffer.bits.instrEndOffset(s2_alignShiftNum).offset := Mux(uncacheIsRvc, 0.U, 1.U)
+    io.toIBuffer.bits.instrEndOffset(s2_alignShiftNum).offset := Mux(uncacheIsRvc || s2_prevEndIsHalfRvi, 0.U, 1.U)
 
     io.toIBuffer.bits.exceptionType := s2_icacheMeta(0).exception || uncacheException || uncacheRvcException
     // execption can happen in next page only when cross page.
