@@ -141,6 +141,10 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   private val redirect = Mux(backendRedirect.valid, backendRedirect, ifuRedirect)
 
+  // redirect->prefetch bypass beat: cycle after a redirect, before BPU re-enqueues the target.
+  private val redirectNext   = RegNext(redirect)
+  private val bypassPrefetch = redirectNext.valid && !redirect.valid
+
   // Instruction page fault and instruction access fault are sent from backend with redirect requests.
   // When IPF and IAF are sent, backendPcFaultIfuPtr points to the FTQ entry whose first instruction
   // raises IPF or IAF, which is ifuWbPtr_write or IfuPtr_write.
@@ -338,16 +342,27 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val twoPrefetchCase = TwoPrefetchCase(prefetchReq, io.toICache.toPrefetch.fire && canTwoPrefetch)
 
   // FIXME: backend redirect delay should be more than ITLB csr delay
-  io.toICache.toPrefetch.valid := bpuPtr(0) > pfPtr(0) && !redirect.valid
+  //
+  // bypass beat: prefetch the redirect target (pfPtr(0) == newEntryPtr) before BPU re-enqueues it, so
+  // WayLookup[N] is populated earlier. Force Conflict -> single prefetch, so req(1) can't write a phantom
+  // WayLookup entry and pfPtr advances by exactly 1 (no duplicate). isCrossLine forced (entry size unknown).
+  io.toICache.toPrefetch.valid := (bpuPtr(0) > pfPtr(0) || bypassPrefetch) && !redirect.valid
   io.toICache.toPrefetch.bits.req.zipWithIndex.foreach { case (req, i) =>
-    req.startVAddr       := prefetchReq(i).startVAddr
-    req.nextLineVAddr    := req.startVAddr + blockBytes.U
-    req.isCrossLine      := prefetchReq(i).isCrossLine
+    req.startVAddr := {
+      if (i == 0) Mux(bypassPrefetch, redirectNext.bits.target, prefetchReq(i).startVAddr)
+      else prefetchReq(i).startVAddr
+    }
+    req.nextLineVAddr := req.startVAddr + blockBytes.U
+    req.isCrossLine := {
+      if (i == 0) Mux(bypassPrefetch, true.B, prefetchReq(i).isCrossLine)
+      else prefetchReq(i).isCrossLine
+    }
     req.ftqIdx           := pfPtr(i)
     req.backendException := Mux(backendExceptionPtr === pfPtr(i), backendException, ExceptionType.None)
     req.isSoftPrefetch   := false.B
   }
-  io.toICache.toPrefetch.bits.twoPrefetchCase := Mux(canTwoPrefetch, twoPrefetchCase, TwoPrefetchCase.Conflict)
+  io.toICache.toPrefetch.bits.twoPrefetchCase :=
+    Mux(bypassPrefetch, TwoPrefetchCase.Conflict, Mux(canTwoPrefetch, twoPrefetchCase, TwoPrefetchCase.Conflict))
 
   // --------------------------------------------------------------------------------
   // 2-fetch
