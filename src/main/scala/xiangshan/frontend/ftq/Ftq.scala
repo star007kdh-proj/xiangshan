@@ -229,11 +229,13 @@ class Ftq(implicit p: Parameters) extends FtqModule
     perfQueue(s3BpuPtr).isCfi.foreach(_ := false.B)
     perfQueue(s3BpuPtr).mispredict := false.B
 
-    // pair second slot: redirect + perf meta only (resolve/commit suppressed).
+    // pair second slot: redirect/perf/commit meta (resolve suppressed); commit copies first's
+    // so a redirect-corrected call/ret in the second block does not train RAS from stale meta.
     if (EnableTwoTaken) {
       when(io.fromBpu.meta.bits.isPair.get) {
         val secondPtr = (io.fromBpu.s3FtqPtr + 1.U).value
         metaQueueRedirect(secondPtr)    := io.fromBpu.meta.bits.secondRedirectMeta.get
+        metaQueueCommit(secondPtr)      := io.fromBpu.meta.bits.commitMeta
         perfQueue(secondPtr).bpuPerf    := io.fromBpu.meta.bits.secondPerfMeta.get
         perfQueue(secondPtr).isCfi.foreach(_ := false.B)
         perfQueue(secondPtr).mispredict := false.B

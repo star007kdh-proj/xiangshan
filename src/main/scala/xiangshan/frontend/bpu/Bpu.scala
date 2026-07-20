@@ -335,7 +335,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       // confidence emit gate (attribute-dependent threshold)
       (s1_ubtbPair.bits.confidence >= s1_pairConfThreshold) &&
       s1_ubtbPair.bits.first.taken &&
-      // slot A: cond / direct-jmp / direct-call; reject return + indirect
+      // slot A: cond / direct-jmp only; a call would make the copied second-slot RAS views pre-push
+      !s1_ubtbPair.bits.first.attribute.hasPush &&
       !s1_ubtbPair.bits.first.attribute.hasPop &&
       !s1_ubtbPair.bits.first.attribute.isIndirect &&
       // slot B: direct-jmp / conditional; reject call + return + indirect
@@ -763,7 +764,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("commonHRPairSecondShift", s3_fire && s3_usePair && !s3_override)
     XSPerfAccumulate("pairFireToFtq",
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
-    // slot-A-call pairs: second-slot RAS meta is approximated; track frequency.
+    // slot A rejects calls, so copied second-slot RAS views are exact; this must stay zero.
     XSPerfAccumulate("pairFireCallA", s1_pairFire && s1_ubtbPair.bits.first.attribute.hasPush)
   }
   XSPerfHistogram(
