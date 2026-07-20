@@ -100,11 +100,10 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // metaQueueRedirect stores speculation information needed by BPU when redirect happens.
   private val metaQueueRedirect = Reg(Vec(FtqSize, new BpuRedirectMeta))
 
-  // pair-tracking sidecar: first slot marker + its startPc (for uBTB demote),
-  // and second slot marker (its resolve training is suppressed).
+  // pair-tracking sidecar; pairSecondStartPc holds the pair-first startPc at the second slot (for uBTB mispKill)
   private val isPairFirst       = RegInit(VecInit.fill(FtqSize)(false.B))
-  private val pairFirstStartPc  = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
   private val isPairSecond      = RegInit(VecInit.fill(FtqSize)(false.B))
+  private val pairSecondStartPc = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
 
   // metaQueue stores information needed to train BPU.
   private val metaQueueResolve = Reg(Vec(FtqSize, new BpuResolveMeta))
@@ -213,9 +212,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
       isPairFirst(predictionPtr.value)  := pairEnq
       isPairSecond(predictionPtr.value) := false.B // any enqueue to a slot clears its second flag
       when(pairEnq) {
-        pairFirstStartPc(predictionPtr.value) := prediction.bits.startPc
         isPairFirst((predictionPtr + 1.U).value)  := false.B
         isPairSecond((predictionPtr + 1.U).value) := true.B
+        pairSecondStartPc((predictionPtr + 1.U).value) := prediction.bits.startPc
       }
     }
   }
@@ -387,8 +386,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     p := redirect.valid && isPairSecond(redirect.bits.ftqIdx.value)
   }
   io.toBpu.redirect.bits.pairFirstStartPc.foreach { p =>
-    val prevIdx = (redirect.bits.ftqIdx - 1.U).value
-    p := pairFirstStartPc(prevIdx)
+    p := pairSecondStartPc(redirect.bits.ftqIdx.value)
   }
   if (EnableTwoTaken) {
     // false pair-second attributions the stale isPairFirst(prev) marker would have made
