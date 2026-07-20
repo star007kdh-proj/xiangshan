@@ -381,14 +381,20 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.redirect.bits.meta      := metaQueueRedirect(redirect.bits.ftqIdx.value)
   io.toBpu.redirectFromIFU         := ifuRedirect.valid
 
-  // pair-second mispred markers: prior slot is pair-first; carry its startPc for uBTB demote.
+  // pair-second mispred markers: use the slot's own flag, cleared on every re-enqueue
+  // (isPairFirst of the prior slot survives a redirect targeting that slot and goes stale).
   io.toBpu.redirect.bits.isPairSecond.foreach { p =>
-    val prevIdx = (redirect.bits.ftqIdx - 1.U).value
-    p := redirect.valid && isPairFirst(prevIdx)
+    p := redirect.valid && isPairSecond(redirect.bits.ftqIdx.value)
   }
   io.toBpu.redirect.bits.pairFirstStartPc.foreach { p =>
     val prevIdx = (redirect.bits.ftqIdx - 1.U).value
     p := pairFirstStartPc(prevIdx)
+  }
+  if (EnableTwoTaken) {
+    // false pair-second attributions the stale isPairFirst(prev) marker would have made
+    XSPerfAccumulate("pairSecondMarkerStaleFirst",
+      redirect.valid && isPairFirst((redirect.bits.ftqIdx - 1.U).value) &&
+        !isPairSecond(redirect.bits.ftqIdx.value))
   }
 
   resolveQueue.io.backendRedirect    := backendRedirect.valid
