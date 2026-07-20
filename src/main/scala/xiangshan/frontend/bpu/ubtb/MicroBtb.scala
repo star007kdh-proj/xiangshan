@@ -273,11 +273,11 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     when(io.redirectValid.get) {
       // drop the pre-redirect prev; do not latch this cycle's ft (flush in flight)
       pairPrev_valid := false.B
-    }.otherwise {
-      pairPrev_valid := ftFire
-      when(ftFire) {
-        pairPrev_ft := io.fastTrain.get.bits
-      }
+    }.elsewhen(ftFire) {
+      // hold prev across fastTrain bubbles: the next beat is still the stream
+      // successor, and the startPc==target check rejects non-adjacent chains.
+      pairPrev_valid := true.B
+      pairPrev_ft    := io.fastTrain.get.bits
     }
   }
 
@@ -499,6 +499,9 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       val cur_attr = io.fastTrain.get.bits.finalPrediction.attribute
       val cur_taken = io.fastTrain.get.bits.finalPrediction.taken
       XSPerfAccumulate("pairChainFound", t0_pairSeq)
+      // chains recovered by holding prev across a fastTrain bubble
+      XSPerfAccumulate("pairChainAcrossBubble",
+        t0_pairSeq && !RegNext(io.fastTrain.get.valid && io.enable, false.B))
       XSPerfAccumulate("pairChainBroken",
         pairPrev_valid && io.fastTrain.get.valid && io.enable &&
           pairPrev_ft.finalPrediction.taken && !t0_pairSeq)
