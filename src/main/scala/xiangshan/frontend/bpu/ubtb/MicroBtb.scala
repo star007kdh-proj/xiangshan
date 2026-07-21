@@ -292,11 +292,11 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
         (cur.bits.startPc.toUInt =/= pairPrev_ft.startPc.toUInt)
     } else false.B
 
-  // slot A type gate: cond / direct-jmp only; reject call + return + indirect (matches the emit gate).
+  // slot A type gate: cond / direct-jmp / direct-call; reject return + indirect.
   private val t0_slotAOk =
     if (EnableTwoTaken) {
       val a = pairPrev_ft.finalPrediction.attribute
-      !a.hasPush && !a.hasPop && !a.isIndirect
+      !a.hasPop && !a.isIndirect
     } else false.B
 
   // locate slot A entry by tag(prev.startPc)
@@ -511,11 +511,6 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       XSPerfAccumulate("pairSkipFirstIndirect",
         t0_pairSeq && !pairPrev_ft.finalPrediction.attribute.hasPop &&
           pairPrev_ft.finalPrediction.attribute.isIndirect)
-      // chains lost to the call-A reject; gauges whether exact post-push second-slot meta is worth building
-      XSPerfAccumulate("pairSkipFirstCall",
-        t0_pairSeq && !pairPrev_ft.finalPrediction.attribute.hasPop &&
-          !pairPrev_ft.finalPrediction.attribute.isIndirect &&
-          pairPrev_ft.finalPrediction.attribute.hasPush)
       XSPerfAccumulate("pairFastTrainKill", t0_fastTrainKill)
       XSPerfAccumulate("pairFastTrainKillNoTaken", t0_fastTrainKill && !cur_taken)
       XSPerfAccumulate("pairFastTrainKillRet", t0_fastTrainKill && cur_taken && cur_attr.hasPop)

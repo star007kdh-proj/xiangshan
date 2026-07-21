@@ -335,8 +335,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       // confidence emit gate (attribute-dependent threshold)
       (s1_ubtbPair.bits.confidence >= s1_pairConfThreshold) &&
       s1_ubtbPair.bits.first.taken &&
-      // slot A: cond / direct-jmp only; a call would make the copied second-slot RAS views pre-push
-      !s1_ubtbPair.bits.first.attribute.hasPush &&
+      // slot A: cond / direct-jmp / direct-call; reject return + indirect
       !s1_ubtbPair.bits.first.attribute.hasPop &&
       !s1_ubtbPair.bits.first.attribute.isIndirect &&
       // slot B: direct-jmp / conditional; reject call + return + indirect
@@ -531,18 +530,22 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   io.toFtq.meta.bits.commitMeta   := s3_commitMeta
 
   // pair second slot redirect meta (post-first view): PHR from secondPhrPtr,
-  // commonHR post-first ghr/bw/imli with empty descriptors, RAS copied from first.
+  // commonHR post-first ghr/bw/imli with empty descriptors, RAS post-push view.
   if (EnableTwoTaken) {
     val s3_secondRedirectMeta = Wire(new BpuRedirectMeta)
-    s3_secondRedirectMeta := s3_redirectMeta // RAS + defaults copied from first
+    s3_secondRedirectMeta := s3_redirectMeta // defaults copied from first
     s3_secondRedirectMeta.phr.phrPtr     := s3_phrMeta.secondPhrPtr.get
     s3_secondRedirectMeta.phr.phrLowBits := s3_phrMeta.secondPhrLowBits.get
     s3_secondRedirectMeta.commonHRMeta.ghr  := commonHR.io.s3PostGhr.get
     s3_secondRedirectMeta.commonHRMeta.bw   := commonHR.io.s3PostBw.get
     s3_secondRedirectMeta.commonHRMeta.imli := commonHR.io.s3PostImli.get
     s3_secondRedirectMeta.commonHRMeta.hitMask.foreach(_ := false.B)
+    s3_secondRedirectMeta.ras := ras.io.postPushRedirectMeta.get
+    val s3_secondCommitMeta = Wire(new BpuCommitMeta)
+    s3_secondCommitMeta.ras := ras.io.postPushCommitMeta.get
     io.toFtq.meta.bits.isPair.get             := s3_usePair && !s3_override
     io.toFtq.meta.bits.secondRedirectMeta.get := s3_secondRedirectMeta
+    io.toFtq.meta.bits.secondCommitMeta.get   := s3_secondCommitMeta
   }
 
   // s0_startPc selection. On a pair fire, jump past first.target straight to
@@ -764,7 +767,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("commonHRPairSecondShift", s3_fire && s3_usePair && !s3_override)
     XSPerfAccumulate("pairFireToFtq",
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
-    // slot A rejects calls, so copied second-slot RAS views are exact; this must stay zero.
+    // slot-A-call pair fires; second-slot meta carries the post-push RAS view.
     XSPerfAccumulate("pairFireCallA", s1_pairFire && s1_ubtbPair.bits.first.attribute.hasPush)
   }
   XSPerfHistogram(

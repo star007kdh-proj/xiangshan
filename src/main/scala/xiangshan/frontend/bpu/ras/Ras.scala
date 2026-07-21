@@ -48,6 +48,11 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
     val topRetAddr:   PrunedAddr      = Output(PrunedAddr(VAddrBits))
     val redirectMeta: RasRedirectMeta = Output(new RasRedirectMeta)
     val commitMeta:   RasCommitMeta   = Output(new RasCommitMeta)
+    // post-push views for the pair second slot (equal the pre views when no push)
+    val postPushRedirectMeta: Option[RasRedirectMeta] =
+      if (EnableTwoTaken) Option(Output(new RasRedirectMeta)) else None
+    val postPushCommitMeta: Option[RasCommitMeta] =
+      if (EnableTwoTaken) Option(Output(new RasCommitMeta)) else None
   }
 
   val io: RasIO = IO(new RasIO)
@@ -68,7 +73,8 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
   private val specIn       = io.specIn.bits
   private val specAlignPc  = specIn.startPc & alignMask
   private val specPushAddr = specAlignPc + (specIn.cfiPosition << 1.U).asUInt + 2.U
-  stack.spec.pushValid := specPush && !stackNearOverflow
+  private val specPushLive = specPush && !stackNearOverflow
+  stack.spec.pushValid := specPushLive
   stack.spec.popValid  := specPop && !stackNearOverflow
 
   stack.spec.pushAddr := PrunedAddrInit(specPushAddr)
@@ -89,6 +95,20 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
   io.redirectMeta := redirectMeta
   io.commitMeta   := commitMeta
   io.topRetAddr   := stack.spec.popAddr
+
+  io.postPushRedirectMeta.foreach { m =>
+    val post = stack.postPushMeta.get
+    m.ssp        := post.ssp
+    m.sctr       := post.sctr
+    m.tosr       := post.tosr
+    m.tosw       := post.tosw
+    m.nos        := post.nos
+    m.topRetAddr := Mux(specPushLive, stack.spec.pushAddr, stack.spec.popAddr)
+  }
+  io.postPushCommitMeta.foreach { m =>
+    m.ssp  := stack.postPushMeta.get.ssp
+    m.tosw := stack.postPushMeta.get.tosw
+  }
 
   private val redirect = RegNextWithEnable(io.redirect)
   // when we mispredict a call, we must redo a push operation
