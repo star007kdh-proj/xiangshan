@@ -104,11 +104,10 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // metaQueueRedirect stores speculation information needed by BPU when redirect happens.
   private val metaQueueRedirect = Reg(Vec(FtqSize, new BpuRedirectMeta))
 
-  // pair-tracking sidecar: first slot marker + its startPc (for uBTB demote),
-  // and second slot marker (its resolve training is suppressed).
+  // pair-tracking sidecar; pairSecondStartPc holds the pair-first startPc at the second slot (for uBTB mispKill)
   private val isPairFirst       = RegInit(VecInit.fill(FtqSize)(false.B))
-  private val pairFirstStartPc  = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
   private val isPairSecond      = RegInit(VecInit.fill(FtqSize)(false.B))
+  private val pairSecondStartPc = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
 
   // metaQueue stores information needed to train BPU.
   private val metaQueueResolve = Reg(Vec(FtqSize, new BpuResolveMeta))
@@ -231,9 +230,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
       isPairFirst(predictionPtr.value)  := pairEnq
       isPairSecond(predictionPtr.value) := false.B // any enqueue to a slot clears its second flag
       when(pairEnq) {
-        pairFirstStartPc(predictionPtr.value) := prediction.bits.startPc
         isPairFirst((predictionPtr + 1.U).value)  := false.B
         isPairSecond((predictionPtr + 1.U).value) := true.B
+        pairSecondStartPc((predictionPtr + 1.U).value) := prediction.bits.startPc
       }
     }
   }
@@ -249,11 +248,12 @@ class Ftq(implicit p: Parameters) extends FtqModule
     s3PerfQueue(s3BpuPtr).isCfi.foreach(_ := false.B)
     s3PerfQueue(s3BpuPtr).mispredict := false.B
 
-    // pair second slot: redirect + perf meta only (resolve/commit suppressed).
+    // pair second slot: redirect/perf/commit meta with the post-first views (resolve suppressed)
     if (EnableTwoTaken) {
       when(io.fromBpu.meta.bits.isPair.get) {
         val secondPtr = (io.fromBpu.s3FtqPtr + 1.U).value
         metaQueueRedirect(secondPtr)      := io.fromBpu.meta.bits.secondRedirectMeta.get
+        metaQueueCommit(secondPtr)        := io.fromBpu.meta.bits.secondCommitMeta.get
         s3PerfQueue(secondPtr).bpuPerf    := io.fromBpu.meta.bits.secondPerfMeta.get
         s3PerfQueue(secondPtr).isCfi.foreach(_ := false.B)
         s3PerfQueue(secondPtr).mispredict := false.B
@@ -437,14 +437,19 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.redirect.bits.meta      := RegNext(metaQueueRedirect(redirectFtqIdxInAdvance.value))
   io.toBpu.redirectFromIFU         := ifuRedirect.valid
 
-  // pair-second mispred markers: prior slot is pair-first; carry its startPc for uBTB demote.
+  // pair-second mispred markers: use the slot's own flag, cleared on every re-enqueue
+  // (isPairFirst of the prior slot survives a redirect targeting that slot and goes stale).
   io.toBpu.redirect.bits.isPairSecond.foreach { p =>
-    val prevIdx = (redirect.bits.ftqIdx - 1.U).value
-    p := redirect.valid && isPairFirst(prevIdx)
+    p := redirect.valid && isPairSecond(redirect.bits.ftqIdx.value)
   }
   io.toBpu.redirect.bits.pairFirstStartPc.foreach { p =>
-    val prevIdx = (redirect.bits.ftqIdx - 1.U).value
-    p := pairFirstStartPc(prevIdx)
+    p := pairSecondStartPc(redirect.bits.ftqIdx.value)
+  }
+  if (EnableTwoTaken) {
+    // false pair-second attributions the stale isPairFirst(prev) marker would have made
+    XSPerfAccumulate("pairSecondMarkerStaleFirst",
+      redirect.valid && isPairFirst((redirect.bits.ftqIdx - 1.U).value) &&
+        !isPairSecond(redirect.bits.ftqIdx.value))
   }
 
   resolveQueue.io.backendRedirect    := backendRedirect.valid

@@ -330,9 +330,10 @@ class BpuMeta(implicit p: Parameters) extends BpuBundle {
   val resolveMeta:  BpuResolveMeta  = new BpuResolveMeta
   val commitMeta:   BpuCommitMeta   = new BpuCommitMeta
 
-  // pair second slot meta (redirect + perf for branch B); resolve/commit suppressed.
+  // pair second slot meta (redirect + commit + perf for branch B); resolve suppressed.
   val isPair:             Option[Bool]            = if (EnableTwoTaken) Some(Bool()) else None
   val secondRedirectMeta: Option[BpuRedirectMeta] = if (EnableTwoTaken) Some(new BpuRedirectMeta) else None
+  val secondCommitMeta:   Option[BpuCommitMeta]   = if (EnableTwoTaken) Some(new BpuCommitMeta) else None
   val secondPerfMeta:     Option[BpuPerfMeta]     = if (EnableTwoTaken) Some(new BpuPerfMeta) else None
 }
 

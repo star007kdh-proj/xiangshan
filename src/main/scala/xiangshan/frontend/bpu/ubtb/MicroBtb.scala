@@ -273,11 +273,11 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     when(io.redirectValid.get) {
       // drop the pre-redirect prev; do not latch this cycle's ft (flush in flight)
       pairPrev_valid := false.B
-    }.otherwise {
-      pairPrev_valid := ftFire
-      when(ftFire) {
-        pairPrev_ft := io.fastTrain.get.bits
-      }
+    }.elsewhen(ftFire) {
+      // hold prev across fastTrain bubbles: the next beat is still the stream
+      // successor, and the startPc==target check rejects non-adjacent chains.
+      pairPrev_valid := true.B
+      pairPrev_ft    := io.fastTrain.get.bits
     }
   }
 
@@ -292,7 +292,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
         (cur.bits.startPc.toUInt =/= pairPrev_ft.startPc.toUInt)
     } else false.B
 
-  // slot A type gate: allow cond / direct-jmp / direct-call; reject return + indirect.
+  // slot A type gate: cond / direct-jmp / direct-call; reject return + indirect.
   private val t0_slotAOk =
     if (EnableTwoTaken) {
       val a = pairPrev_ft.finalPrediction.attribute
@@ -324,7 +324,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       val cur_attr = cur_pred.attribute
       t0_pairBase && (!cur_pred.taken || cur_attr.hasPop || cur_attr.hasPush || cur_attr.isIndirect)
     } else false.B
-  // eligible: B is direct-jmp or always-taken-proxy conditional -> alloc/confirm/decay
+  // eligible: B is direct-jmp or always-taken-proxy conditional -> alloc/confirm/kill
   private val t0_pairEligible =
     if (UseFastTrain && EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.finalPrediction
@@ -373,7 +373,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     entries(t1_updateIdx) := t1_updatedEntry
   }
 
-  // pair eligible write-back (alloc / confirm / decay), after the generic update;
+  // pair eligible write-back (alloc / confirm / kill), after the generic update;
   // skipped when it targets the same entry idx as the generic update.
   if (EnableTwoTaken) {
     val t1_promoteConflict = t1_fire && (t1_hit || t1_allocate) && (t1_promoteIdx === t1_updateIdx)
@@ -384,8 +384,6 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       (target.slot2.attribute === t1_promoteSlot2Attr) &&
       (target.slot2.target === t1_promoteSlot2Tgt)
     val curConf = target.slot2.confidence.getOrElse(0.U)
-    // decay reaches 0 (then realloc) when a prior pair exists, content differs, conf == 1
-    val decayToZero = priorPair && !sameBR2 && (curConf === 1.U)
 
     def writeSlot2Content(idx: UInt): Unit = {
       entries(idx).slot2.position  := t1_promoteSlot2Pos
@@ -397,28 +395,39 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     }
 
     when(t1_promote && !t1_promoteConflict) {
-      entries(t1_promoteIdx).isPair.foreach(_ := true.B)
-      entries(t1_promoteIdx).slot2.valid := true.B
-      entries(t1_promoteIdx).slot2.taken := true.B
       when(!priorPair) {
         // PairAlloc: no live pair -> install slot2, confidence 1
+        entries(t1_promoteIdx).isPair.foreach(_ := true.B)
+        entries(t1_promoteIdx).slot2.valid := true.B
+        entries(t1_promoteIdx).slot2.taken := true.B
         writeSlot2Content(t1_promoteIdx)
         entries(t1_promoteIdx).slot2.confidence.foreach(_ := 1.U)
       }.elsewhen(sameBR2) {
         // PairConfirm: content matches -> saturating increment, keep slot2
+        entries(t1_promoteIdx).slot2.valid := true.B
+        entries(t1_promoteIdx).slot2.taken := true.B
         entries(t1_promoteIdx).slot2.confidence.foreach { c =>
           c := Mux(curConf === PairConfMax.U, curConf, curConf + 1.U)
         }
       }.otherwise {
-        // PairDecay: content differs -> decrement; on reaching 0, realloc new B
-        when(decayToZero) {
-          writeSlot2Content(t1_promoteIdx)
-          entries(t1_promoteIdx).slot2.confidence.foreach(_ := 1.U)
-        }.otherwise {
-          entries(t1_promoteIdx).slot2.confidence.foreach(_ := curConf - 1.U)
-        }
+        // PairKill: any content mismatch proves the pair unstable -> invalidate now;
+        // a later clean pass re-allocs the new content (confidence counts consecutive
+        // confirms, so the emit threshold means N clean passes in a row).
+        entries(t1_promoteIdx).isPair.foreach(_ := false.B)
+        entries(t1_promoteIdx).slot2.valid := false.B
+        entries(t1_promoteIdx).slot2.confidence.foreach(_ := 0.U)
       }
     }
+
+    // content-mismatch kills, split by position relation for diagnosis
+    val t1_contentKill = t1_promote && !t1_promoteConflict && priorPair && !sameBR2
+    XSPerfAccumulate("pairContentKill", t1_contentKill)
+    XSPerfAccumulate("pairContentKillPosEarlier",
+      t1_contentKill && t1_promoteSlot2Pos < target.slot2.position)
+    XSPerfAccumulate("pairContentKillPosLater",
+      t1_contentKill && t1_promoteSlot2Pos > target.slot2.position)
+    XSPerfAccumulate("pairContentKillTgtOnly",
+      t1_contentKill && t1_promoteSlot2Pos === target.slot2.position)
 
     // fastTrainKill: invalidate slot2 of the prev entry on ineligible B. Runs after
     // the generic write so it wins by last-connect even on idx aliasing.
@@ -490,6 +499,9 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       val cur_attr = io.fastTrain.get.bits.finalPrediction.attribute
       val cur_taken = io.fastTrain.get.bits.finalPrediction.taken
       XSPerfAccumulate("pairChainFound", t0_pairSeq)
+      // chains recovered by holding prev across a fastTrain bubble
+      XSPerfAccumulate("pairChainAcrossBubble",
+        t0_pairSeq && !RegNext(io.fastTrain.get.valid && io.enable, false.B))
       XSPerfAccumulate("pairChainBroken",
         pairPrev_valid && io.fastTrain.get.valid && io.enable &&
           pairPrev_ft.finalPrediction.taken && !t0_pairSeq)

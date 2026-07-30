@@ -58,6 +58,9 @@ class RasStack(implicit p: Parameters) extends RasModule
     val commit:   RasCommitIO     = new RasCommitIO
     val redirect: RasRedirectIO   = new RasRedirectIO
     val meta:     RasInternalMeta = Output(new RasInternalMeta)
+    // meta after this cycle's spec push (equals meta when no push; pops are not folded)
+    val postPushMeta: Option[RasInternalMeta] =
+      if (EnableTwoTaken) Option(Output(new RasInternalMeta)) else None
 
     val specNearOverflow: Bool     = Output(Bool())
     val debug:            RasDebug = new RasDebug
@@ -327,6 +330,26 @@ class RasStack(implicit p: Parameters) extends RasModule
   io.meta.nos  := topNos
   io.meta.ssp  := ssp
   io.meta.sctr := sctr
+
+  // post-push view: mirrors specPush next-state, including the ssp/sctr compression
+  io.postPushMeta.foreach { m =>
+    m.tosw := tosw
+    m.tosr := tosr
+    m.nos  := topNos
+    m.ssp  := ssp
+    m.sctr := sctr
+    when(io.spec.pushValid) {
+      m.tosr := tosw
+      m.tosw := specPtrInc(tosw)
+      m.nos  := tosr
+      when(topEntry.retAddr === io.spec.pushAddr && sctr < StackCounterMax.U) {
+        m.sctr := sctr + 1.U
+      }.otherwise {
+        m.ssp  := ptrInc(ssp)
+        m.sctr := 0.U
+      }
+    }
+  }
 
   private val commitTop = commitStack(nsp)
 

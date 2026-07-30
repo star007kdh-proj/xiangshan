@@ -1,4 +1,4 @@
-// Copyright (c) 2024-2025 Beijing Institute of Open Source Chip (BOSC)
+﻿// Copyright (c) 2024-2025 Beijing Institute of Open Source Chip (BOSC)
 // Copyright (c) 2020-2025 Institute of Computing Technology, Chinese Academy of Sciences
 // Copyright (c) 2020-2021 Peng Cheng Laboratory
 //
@@ -39,6 +39,15 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     // post-first ghr & bw (after the s3 first-block update) for the pair second slot's meta.
     val s3PostGhr: Option[UInt] = if (EnableTwoTaken) Some(Output(UInt(GhrHistoryLength.W))) else None
     val s3PostBw:  Option[UInt] = if (EnableTwoTaken) Some(Output(UInt(BWHistoryLength.W))) else None
+    // post-first imli for the pair second slot's meta.
+    val s3PostImli: Option[UInt] = if (EnableTwoTaken) Some(Output(UInt(ImliWidth.W))) else None
+
+    // pair second branch (skipped block B): s1 feed for imli, s3 feed for ghr/bw.
+    val s1_pairSecondValid:     Option[Bool] = if (EnableTwoTaken) Some(Input(Bool())) else None
+    val s1_pairSecondImliTaken: Option[Bool] = if (EnableTwoTaken) Some(Input(Bool())) else None
+    val s3_pairSecondValid:     Option[Bool] = if (EnableTwoTaken) Some(Input(Bool())) else None
+    val s3_pairSecondIsCond:    Option[Bool] = if (EnableTwoTaken) Some(Input(Bool())) else None
+    val s3_pairSecondBwTaken:   Option[Bool] = if (EnableTwoTaken) Some(Input(Bool())) else None
 
     val s0_startPc: Option[PrunedAddr] = Some(Input(PrunedAddr(VAddrBits))) // for debug
   }
@@ -116,9 +125,27 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     Option(s3_taken && s3_bwTaken)
   )(BWHistoryLength)
 
-  // Post-first ghr/bw for the pair second slot's redirect meta.
+  // Post-first ghr/bw for the pair second slot's redirect meta (pre-B; recovery re-applies B).
   io.s3PostGhr.foreach(_ := s3_newCommonHR.ghr)
   io.s3PostBw.foreach(_ := s3_newCommonHR.bw)
+
+  // fold the pair second branch on top of post-first so a pair equals two single blocks.
+  private val s3_pairSecondValid = io.s3_pairSecondValid.getOrElse(false.B)
+  private val s3_newCommonHRPair = WireInit(s3_newCommonHR)
+  if (EnableTwoTaken) {
+    val s3_secondIsCond  = io.s3_pairSecondIsCond.get
+    val s3_secondBwTaken = io.s3_pairSecondBwTaken.get
+    s3_newCommonHRPair.ghr := getNewHR(s3_newCommonHR.ghr, 0.U, 0.U, true.B, s3_secondIsCond)(GhrHistoryLength)
+    s3_newCommonHRPair.bw := getNewHR(
+      s3_newCommonHR.bw,
+      0.U,
+      0.U,
+      true.B,
+      s3_secondIsCond,
+      Option(s3_secondBwTaken)
+    )(BWHistoryLength)
+  }
+  private val s3_nextCommonHR = Mux(s3_pairSecondValid, s3_newCommonHRPair, s3_newCommonHR)
 
   /*
    * redirect recovery CommonHR
@@ -153,7 +180,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   when(r0_valid) {
     commonHR := r0_commonHR // TODO: redirect commonHR recovery can delay one/two cycle
   }.elsewhen(s3_fire) {
-    commonHR := s3_newCommonHR
+    commonHR := s3_nextCommonHR
   }
 
   // imli update
@@ -170,12 +197,23 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     imli    := s3_newImli
     s0_imli := s3_newImli
   }.elsewhen(s1_fire) {
-    val s1_newImli = Mux(io.s1_imliTaken, Mux(s1_imli.andR, s1_imli, s1_imli + 1.U), 0.U)
+    // a pair fire consumes two blocks: apply first then second in program order.
+    def imliNext(cur: UInt, taken: Bool): UInt = Mux(taken, Mux(cur.andR, cur, cur + 1.U), 0.U)
+    val s1_imliAfterFirst = imliNext(s1_imli, io.s1_imliTaken)
+    val s1_imliAfterPair  = imliNext(s1_imliAfterFirst, io.s1_pairSecondImliTaken.getOrElse(false.B))
+    val s1_newImli = Mux(io.s1_pairSecondValid.getOrElse(false.B), s1_imliAfterPair, s1_imliAfterFirst)
     imli    := s1_newImli
     s0_imli := s1_newImli
   }.otherwise {
     s0_imli := imli
   }
+
+  // post-first imli for the pair second slot's redirect meta.
+  io.s3PostImli.foreach(_ := Mux(
+    s3_taken && s3_bwTaken && s3_firstTakenIsCond,
+    Mux(s3_imli.andR, s3_imli, s3_imli + 1.U),
+    0.U
+  ))
 
   /*
    * NOTE:Only applicable to the current predicted flow structure
@@ -201,8 +239,8 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     histQueue(writePtr.value) := r0_commonHR // The queue value during redirect is used for diff
   }.elsewhen(s3_override) {
     val realRecoverPtr = Mux(hasOverrideHist, recoverPtr + 1.U, recoverPtr)
-    histQueue(writePtr.value)         := s3_newCommonHR // update s3_fire block
-    histQueue((writePtr + 1.U).value) := initCommonHR   // write new s0_block
+    histQueue(writePtr.value)         := s3_nextCommonHR // update s3_fire block
+    histQueue((writePtr + 1.U).value) := initCommonHR     // write new s0_block
     enqPtr                            := writePtr + 2.U
     predPtr                           := realRecoverPtr
     writePtr                          := writePtr + 1.U
@@ -214,7 +252,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
       predPtr                 := Mux(predEnable, predPtr + 1.U, predPtr)
     }
     when(writeEnable) {
-      histQueue(writePtr.value) := s3_newCommonHR
+      histQueue(writePtr.value) := s3_nextCommonHR
       writePtr                  := writePtr + 1.U
       recoverPtr                := Mux(recoverInc, recoverPtr + 1.U, recoverPtr)
     }
@@ -231,7 +269,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     Seq(
       r0_valid          -> r0_commonHR,
       s3_override       -> histQueue(recoverPtr.value),
-      (s0_fire && sync) -> s3_newCommonHR, // bypass s3_newCommonHR
+      (s0_fire && sync) -> s3_nextCommonHR, // bypass the post-block value
       s0_fire           -> histQueue(predPtr.value)
     )
   )

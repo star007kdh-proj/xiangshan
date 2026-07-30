@@ -40,11 +40,12 @@ case class BpuParameters(
     // When false, all 2-taken logic is compile-time stripped and generated Verilog
     // is identical to the baseline. Must be enabled together across uBTB/PHR.
     EnableTwoTaken: Boolean = false,
-    // Pair confidence counter (saturating). Emit requires confidence >= an
-    // attribute-dependent threshold: conditional slot B needs more than direct.
+    // Pair confidence counter (saturating). Any content mismatch or not-taken pass
+    // kills the pair outright, so confidence counts consecutive clean passes; emit
+    // requires confidence >= an attribute-dependent threshold (conditional > direct).
     PairConfWidth:           Int = 3,
     PairDirectConfThreshold: Int = 2,
-    PairCondConfThreshold:   Int = 6,
+    PairCondConfThreshold:   Int = 4,
     // Pair fires only when fewer than this many blocks are un-prefetched
     // (prefetch caught up -> downstream hungry). 0 = gate off.
     PairPrefetchHungryDist: Int = 0,

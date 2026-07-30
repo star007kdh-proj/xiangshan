@@ -499,6 +499,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     dontTouch(s1_lastPairFire)
   }
 
+  // post-pair-fire meta is indexed by the pair-first block; drop it so ABTB skips training.
+  private val s2_abtbMetaSkip = if (EnableTwoTaken) RegEnable(s1_lastPairFire, s1_fire) else false.B
+  private val s3_abtbMetaSkip = if (EnableTwoTaken) RegEnable(s2_abtbMetaSkip, s2_fire) else false.B
+  when(s3_abtbMetaSkip) {
+    fastTrain.bits.abtbMeta.valid := false.B
+  }
+
   // used for meta enqueue and s3 override
   private val s2_ftqPtr = RegEnable(io.fromFtq.bpuPtr, s1_fire)
   private val s3_ftqPtr = RegEnable(s2_ftqPtr, s2_fire)
@@ -508,23 +515,41 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s2_usePair = if (EnableTwoTaken) RegEnable(s1_usePair, s1_fire) else false.B
   private val s3_usePair = if (EnableTwoTaken) RegEnable(s2_usePair, s2_fire) else false.B
 
+  // pair second branch view (cond / backward) for commonHR ghr/bw/imli updates
+  private val s1_pairSecondIsCond = if (EnableTwoTaken)
+    s1_ubtbPair.bits.second.attribute.isConditional
+    else false.B
+  private val s1_pairSecondBwTaken = if (EnableTwoTaken)
+    getCfiPcFromPosition(s1_ubtbPair.bits.first.target, s1_ubtbPair.bits.second.cfiPosition).addr >
+      s1_ubtbPair.bits.second.target.addr
+    else false.B
+  private val s2_pairSecondIsCond  = if (EnableTwoTaken) RegEnable(s1_pairSecondIsCond, s1_fire) else false.B
+  private val s3_pairSecondIsCond  = if (EnableTwoTaken) RegEnable(s2_pairSecondIsCond, s2_fire) else false.B
+  private val s2_pairSecondBwTaken = if (EnableTwoTaken) RegEnable(s1_pairSecondBwTaken, s1_fire) else false.B
+  private val s3_pairSecondBwTaken = if (EnableTwoTaken) RegEnable(s2_pairSecondBwTaken, s2_fire) else false.B
+
   io.toFtq.meta.valid             := s3_valid
   io.toFtq.meta.bits.redirectMeta := s3_redirectMeta
   io.toFtq.meta.bits.resolveMeta  := s3_resolveMeta
   io.toFtq.meta.bits.commitMeta   := s3_commitMeta
 
   // pair second slot redirect meta (post-first view): PHR from secondPhrPtr,
-  // commonHR post-first ghr/bw with empty descriptors, RAS copied from first.
+  // commonHR post-first ghr/bw/imli with empty descriptors, RAS post-push view.
   if (EnableTwoTaken) {
     val s3_secondRedirectMeta = Wire(new BpuRedirectMeta)
-    s3_secondRedirectMeta := s3_redirectMeta // RAS + defaults copied from first
+    s3_secondRedirectMeta := s3_redirectMeta // defaults copied from first
     s3_secondRedirectMeta.phr.phrPtr     := s3_phrMeta.secondPhrPtr.get
     s3_secondRedirectMeta.phr.phrLowBits := s3_phrMeta.secondPhrLowBits.get
-    s3_secondRedirectMeta.commonHRMeta.ghr := commonHR.io.s3PostGhr.get
-    s3_secondRedirectMeta.commonHRMeta.bw  := commonHR.io.s3PostBw.get
+    s3_secondRedirectMeta.commonHRMeta.ghr  := commonHR.io.s3PostGhr.get
+    s3_secondRedirectMeta.commonHRMeta.bw   := commonHR.io.s3PostBw.get
+    s3_secondRedirectMeta.commonHRMeta.imli := commonHR.io.s3PostImli.get
     s3_secondRedirectMeta.commonHRMeta.hitMask.foreach(_ := false.B)
+    s3_secondRedirectMeta.ras := ras.io.postPushRedirectMeta.get
+    val s3_secondCommitMeta = Wire(new BpuCommitMeta)
+    s3_secondCommitMeta.ras := ras.io.postPushCommitMeta.get
     io.toFtq.meta.bits.isPair.get             := s3_usePair && !s3_override
     io.toFtq.meta.bits.secondRedirectMeta.get := s3_secondRedirectMeta
+    io.toFtq.meta.bits.secondCommitMeta.get   := s3_secondCommitMeta
   }
 
   // s0_startPc selection. On a pair fire, jump past first.target straight to
@@ -596,6 +621,16 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   commonHR.io.redirect.taken          := redirect.bits.taken
   commonHR.io.redirect.attribute      := redirect.bits.attribute
   commonHR.io.redirect.meta           := redirect.bits.meta.commonHRMeta
+
+  // pair second branch feed: same gates as the PHR pair shift (s1) and the isPair meta (s3)
+  if (EnableTwoTaken) {
+    commonHR.io.s1_pairSecondValid.get := s1_usePair && !s3_override
+    commonHR.io.s1_pairSecondImliTaken.get :=
+      s1_usePair && !s3_override && s1_pairSecondIsCond && s1_pairSecondBwTaken
+    commonHR.io.s3_pairSecondValid.get   := s3_usePair && !s3_override
+    commonHR.io.s3_pairSecondIsCond.get  := s3_pairSecondIsCond
+    commonHR.io.s3_pairSecondBwTaken.get := s3_pairSecondBwTaken
+  }
 
   // Power-on reset
   private val powerOnResetState = RegInit(true.B)
@@ -731,9 +766,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("pairBlockedByS3Override",
       s1_usePair && s3_override && io.toFtq.prediction.fire)
     XSPerfAccumulate("s1PredSuppressedByPair", s1_lastPairFire && s1_abtbValid)
+    XSPerfAccumulate("abtbTrainDroppedPairSkipMeta",
+      fastTrain.valid && fastTrain.bits.finalPrediction.taken && s3_abtbMetaSkip && s3_abtbMeta.valid)
+    XSPerfAccumulate("commonHRPairSecondShift", s3_fire && s3_usePair && !s3_override)
     XSPerfAccumulate("pairFireToFtq",
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
-    // slot-A-call pairs: second-slot RAS meta is approximated; track frequency.
+    // slot-A-call pair fires; second-slot meta carries the post-push RAS view.
     XSPerfAccumulate("pairFireCallA", s1_pairFire && s1_ubtbPair.bits.first.attribute.hasPush)
   }
   XSPerfHistogram(
