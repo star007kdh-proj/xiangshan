@@ -101,9 +101,22 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   // pair lookup (combinational): second.target uses first.target as its block base.
   if (EnableTwoTaken) {
+    require(TargetWidth + instOffsetBits >= PageOffsetWidth, "slot target must store the full page offset")
+
     val s1_isPair = s1_hitEntry.isPair.get && s1_hitEntry.slot2.valid
-    val pairOut   = Wire(Valid(new MicroBtbPairOut))
-    pairOut.valid             := s1_hit && s1_isPair
+
+    // kill pairs whose second cfi sits outside [block start, page end] (Ifu/ICache contract)
+    val s1_secondStartBits         = s1_hitEntry.slot1.target // stored VA[TargetWidth:1]
+    val s1_secondAlignedInstOffset = s1_secondStartBits(FetchBlockAlignWidth - 2, 0)
+    val s1_secondAlignedPageOffset =
+      Cat(s1_secondStartBits(PageOffsetWidth - 2, FetchBlockAlignWidth - 1), 0.U((FetchBlockAlignWidth - 1).W))
+    val s1_secondCfiPageOffset  = s1_secondAlignedPageOffset +& s1_hitEntry.slot2.position
+    val s1_secondCfiBeforeStart = s1_hitEntry.slot2.position < s1_secondAlignedInstOffset
+    val s1_secondCfiCrossPage   = s1_secondCfiPageOffset(PageOffsetWidth - 1)
+    val s1_secondCfiOutOfRange  = s1_secondCfiBeforeStart || s1_secondCfiCrossPage
+
+    val pairOut = Wire(Valid(new MicroBtbPairOut))
+    pairOut.valid             := s1_hit && s1_isPair && !s1_secondCfiOutOfRange
     pairOut.bits.isPair       := s1_isPair
     pairOut.bits.first        := io.prediction.bits
     pairOut.bits.confidence   := s1_hitEntry.slot2.confidence.getOrElse(0.U)
@@ -116,6 +129,8 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       s1_hitEntry.slot2.targetCarry
     )
     io.pairPrediction.get := pairOut
+
+    XSPerfAccumulate("pairKillCfiOutOfRange", s1_fire && s1_hit && s1_isPair && s1_secondCfiOutOfRange)
   }
 
   // update replacer

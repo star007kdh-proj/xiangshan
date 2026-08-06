@@ -200,6 +200,17 @@ class Ftq(implicit p: Parameters) extends FtqModule
     "Pair enqueue and s3Override must not be asserted in the same cycle\n"
   )
 
+  // sim tripwire: a pair-second block must never extend past its page (Ifu/ICache contract)
+  if (EnableTwoTaken) {
+    val pair = prediction.bits.pair.get
+    val pairSecondCfiPageOffset =
+      pair.secondStartPc(PageOffsetWidth - 1, instOffsetBits) +& pair.secondCfiOffset.bits
+    XSError(
+      pairEnq && pairSecondCfiPageOffset(PageOffsetWidth - instOffsetBits),
+      "pair-second fetch block crosses its page\n"
+    )
+  }
+
   private val predictionPtr = MuxCase(
     bpuPtr(0),
     Seq(
