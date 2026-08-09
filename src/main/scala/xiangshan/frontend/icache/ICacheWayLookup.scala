@@ -108,16 +108,30 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   }
 
   // we can store only the first exception encountered, as exceptions must trigger a redirection (and thus a flush)
-  private val exceptionEntry = RegInit(0.U.asTypeOf(Valid(new WayLookupExceptionEntry)))
-  private val exceptionPtr   = RegInit(ICacheWayLookupPtr(false.B, 0.U))
+  // a 2-prefetch write poisons BOTH its entries (one faulting translation, shared garbage pTag),
+  // so the marker must cover both, and each entry keeps its own info (gpAddr differs per block)
+  private val exceptionValid   = RegInit(false.B)
+  private val exceptionEntries = RegInit(VecInit(Seq.fill(FetchPorts)(0.U.asTypeOf(new WayLookupExceptionEntry))))
+  private val exceptionPtr     = RegInit(ICacheWayLookupPtr(false.B, 0.U))
+  private val exceptionIsPair  = RegInit(false.B)
+  private val exceptionHitFirst = VecInit((0 until MaxFetchReqNum).map { i =>
+    exceptionValid && exceptionPtr === (readPtr + i.U)
+  })
+  private val exceptionHitSecond = VecInit((0 until MaxFetchReqNum).map { i =>
+    exceptionValid && exceptionIsPair && (exceptionPtr + 1.U) === (readPtr + i.U)
+  })
   private val exceptionHit = VecInit((0 until MaxFetchReqNum).map { i =>
-    exceptionPtr === (readPtr + i.U) && exceptionEntry.valid
+    exceptionHitFirst(i) || exceptionHitSecond(i)
   })
 
   when(io.flush || bpuS3FlushValid && exceptionPtr === bpuS3FlushPtr) {
     // When flushed by bp3
-    // we don't need to reset exceptionEntry/Ptr to save power
-    exceptionEntry.valid := false.B
+    // we don't need to reset exceptionEntries/Ptr to save power
+    exceptionValid := false.B
+  }
+  // bp3 only ever rolls back the tail entry: if that was the pair-second, shrink the marker to the first entry
+  when(bpuS3FlushValid && exceptionIsPair && (exceptionPtr + 1.U) === bpuS3FlushPtr) {
+    exceptionIsPair := false.B
   }
 
   /* *** update *** */
@@ -144,7 +158,7 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
 
   // if WayLookup is empty, but there is a valid write, we can bypass one to read port (maybe timing critical)
   private val canBypass =
-    empty && io.write(0).valid && !secondWriteValid && !fetchReq(1).valid && !exceptionEntry.valid
+    empty && io.write(0).valid && !secondWriteValid && !fetchReq(1).valid && !exceptionValid
 
   private val canDeq       = !empty && !updateStall(0)
   private val canDeqSecond = numValidEntries > 1.U && !updateStall(0) && !updateStall(1)
@@ -153,7 +167,12 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
 
   private val fetchReqEntry = VecInit((0 until MaxFetchReqNum).map(i => entries((readPtr + i.U).value)))
   private val fetchReqExceptionEntry = VecInit((0 until MaxFetchReqNum).map { i =>
-    Mux(exceptionHit(i), exceptionEntry.bits, 0.U.asTypeOf(new WayLookupExceptionEntry))
+    Mux(
+      exceptionHitFirst(i),
+      exceptionEntries(0),
+      // FetchPorts - 1 keeps the index legal when FetchPorts == 1; hitSecond is constant-false there
+      Mux(exceptionHitSecond(i), exceptionEntries(FetchPorts - 1), 0.U.asTypeOf(new WayLookupExceptionEntry))
+    )
   })
 
   private val isDataSramReadConflict = (0 until DataBanks).map { bankIdx =>
@@ -220,7 +239,7 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   // stall write if there is an exceptions to save power (i.e. wait for flush)
   // this will stall the prefetch pipe
   // also we disallow only 1 ready, to simplify PrefetchPipe
-  io.write.foreach(_.ready := numFreeEntries >= FetchPorts.U && !exceptionEntry.valid)
+  io.write.foreach(_.ready := numFreeEntries >= FetchPorts.U && !exceptionValid)
   when(io.write.head.fire) {
     entries(writePtr.value) := io.write.head.bits.entry
     if (FetchPorts > 1) {
@@ -228,11 +247,17 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
         entries(writePtr.value + 1.U) := io.write.last.bits.entry
       }
     }
-    // ftq/prefetchPipe ensure fetch blocks has the same exception, here we can consider only .head
+    // ftq/prefetchPipe give both fetch blocks the same itlbException; gpAddr differs, so store both entries
     when(io.write.head.bits.itlbException.hasException) {
-      exceptionEntry.valid := true.B
-      exceptionEntry.bits  := io.write.head.bits.exceptionEntry
-      exceptionPtr         := writePtr
+      exceptionValid      := true.B
+      exceptionEntries(0) := io.write.head.bits.exceptionEntry
+      exceptionPtr        := writePtr
+      exceptionIsPair     := (if (FetchPorts > 1) io.write.last.fire else false.B)
+      if (FetchPorts > 1) {
+        when(io.write.last.fire) {
+          exceptionEntries(1) := io.write.last.bits.exceptionEntry
+        }
+      }
     }
   }
   // the second port (if FetchPorts == 2) must fire together with the first port
@@ -255,6 +280,7 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   XSPerfAccumulate("empty_when_write", empty && io.write.head.fire)
   XSPerfAccumulate("bypass", empty && io.write.head.fire && canBypass && io.toMainPipe.fire)
   // exception stall cycles
-  XSPerfAccumulate("waitingForExceptionRead", exceptionEntry.valid && !empty)
-  XSPerfAccumulate("waitingForExceptionFlush", exceptionEntry.valid && empty)
+  XSPerfAccumulate("waitingForExceptionRead", exceptionValid && !empty)
+  XSPerfAccumulate("waitingForExceptionFlush", exceptionValid && empty)
+  XSPerfAccumulate("exceptionPairSecondServed", io.toMainPipe.fire && exceptionHitSecond(0))
 }
