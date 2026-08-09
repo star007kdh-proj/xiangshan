@@ -395,17 +395,16 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s1_fetchFinish = !s1_shouldFetch.reduce(_ || _)
   dontTouch(s1_fetchFinish)
 
-  private val s1_portValid = VecInit(s1_lineValid.flatten)
-
-  // also raise af if l2 corrupt is detected
-  private val s1_tlException =
-    (s1_tlCorrupt.flatten zip s1_tlDenied.flatten).zipWithIndex.map { case ((corrupt, denied), i) =>
-      val portValid   = s1_portValid(i)
-      val realCorrupt = corrupt && portValid
-      val realDenied  = denied && portValid
+  // also raise af if l2 corrupt is detected; per fetch block, so a block-1 error is not broadcast to block 0
+  private val s1_tlException = VecInit((0 until MaxFetchReqNum).map { reqIdx =>
+    (0 until PortNumber).map { portIdx =>
+      val portValid   = s1_lineValid(reqIdx)(portIdx)
+      val realCorrupt = s1_tlCorrupt(reqIdx)(portIdx) && portValid
+      val realDenied  = s1_tlDenied(reqIdx)(portIdx) && portValid
       val canAssert   = s1_valid && portValid
       ExceptionType.fromTileLink(realCorrupt, realDenied, canAssert)
     }.reduce(_ || _)
+  })
 
   // If EnableCorruptRefetch, no need to raise exception as it's been auto-recovered by re-fetching from L2
   // otherwise, raise Hardware Error Exception
@@ -416,7 +415,11 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
       ExceptionType.fromEcc(s1_metaCorrupt.reduce(_ || _) || s1_dataCorrupt.reduce(_ || _), s1_valid)
 
   // merge all exceptions, itlb/pmp has the highest priority, then l2/ecc
-  private val s1_exceptionOut = s1_exception || s1_tlException || s1_eccException
+  // itlb/pmp/ecc are block-0 scoped (block-1 itlb is demoted in wayLookup, pmp/ecc are only checked on block 0)
+  private val s1_exceptionOut = VecInit(
+    s1_exception || s1_tlException(0) || s1_eccException,
+    s1_tlException(1)
+  )
 
   io.toIfu.req.valid := s1_valid && s1_fetchFinish && !s1_flush
   io.toIfu.req.bits.zipWithIndex.foreach { case (req, i) =>
@@ -430,7 +433,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     req.maybeRvcMap      := s1_maybeRvcMap(i)
     req.perf_isCrossLine := s1_req(i).isCrossLine
 
-    req.icacheMeta.exception          := s1_exceptionOut
+    req.icacheMeta.exception          := s1_exceptionOut(i)
     req.icacheMeta.pmpMmio            := s1_pmpMmio
     req.icacheMeta.isBackendException := s1_req(i).hasBackendException
     req.icacheMeta.isForVSnonLeafPTE  := s1_exceptionInfo(i).isForVSnonLeafPTE
@@ -481,7 +484,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   accessTrace.wayMask    := s1_wayMask(0)
   accessTrace.crossLine  := s1_req(0).isCrossLine
   accessTrace.waitRefill := perf_waitRefill
-  accessTrace.exception  := s1_exceptionOut
+  accessTrace.exception  := s1_exceptionOut(0)
   accessTrace.pmpMmio    := s1_pmpMmio
   accessTrace.itlbPbmt   := s1_wayLookupEntry(0).itlbPbmt
   accessTrace.rawHits    := s1_rawHits

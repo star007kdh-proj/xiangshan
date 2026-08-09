@@ -165,20 +165,26 @@ class Ifu(implicit p: Parameters) extends IfuModule
   )
   dontTouch(s0_invalidTaken)
 
+  // a block-1-only icache exception (e.g. tilelink corrupt) cannot ride the block-0 exception carrier:
+  // drop block 1 here and refetch it alone via wb redirect, so it re-arrives as a block-0 exception
+  private val s0_secondHasException = s0_fetchBlock(1).valid &&
+    s0_icacheMeta(1).exception.hasException && !s0_icacheMeta(0).exception.hasException
+  private val s0_dropSecondBlock = s0_invalidTaken(0) || s0_secondHasException
+
   private val s0_fixedFetchBlock = WireDefault(s0_fetchBlock)
-  when(s0_invalidTaken(0)) {
+  when(s0_dropSecondBlock) {
     s0_fixedFetchBlock(1).valid := false.B
   }
 
   dontTouch(s0_fixedFetchBlock)
 
-  private val s0_fixedTotalEndPos       = Mux(s0_invalidTaken(0), s0_fetchBlock(0).takenCfiOffset.bits, s0_totalEndPos)
-  private val s0_fixedTotalEndIsHalfRvi = Mux(s0_invalidTaken(0), s0_firstEndIsHalfRvi, s0_totalEndIsHalfRvi)
-  private val s0_fixedInvalidTaken      = VecInit(s0_invalidTaken(0), s0_invalidTaken(1) && !s0_invalidTaken(0))
+  private val s0_fixedTotalEndPos       = Mux(s0_dropSecondBlock, s0_fetchBlock(0).takenCfiOffset.bits, s0_totalEndPos)
+  private val s0_fixedTotalEndIsHalfRvi = Mux(s0_dropSecondBlock, s0_firstEndIsHalfRvi, s0_totalEndIsHalfRvi)
+  private val s0_fixedInvalidTaken      = VecInit(s0_invalidTaken(0), s0_invalidTaken(1) && !s0_dropSecondBlock)
 
   private val s0_fixedRawInstrVec = WireDefault(s0_rawInstrVec)
   s0_fixedRawInstrVec.foreach { instr =>
-    when(s0_invalidTaken(0) && instr.blockSel) {
+    when(s0_dropSecondBlock && instr.blockSel) {
       instr.valid := false.B
     }
   }
@@ -246,10 +252,11 @@ class Ifu(implicit p: Parameters) extends IfuModule
   s1_fire  := s1_valid && s2_ready
   s1_ready := s1_fire || !s1_valid
 
-  private val s1_fetchBlock   = RegEnable(s0_fixedFetchBlock, s0_fire)
-  private val s1_predTakenIdx = RegEnable(s0_predTakenIdx, s0_fire)
-  private val s1_invalidTaken = RegEnable(s0_fixedInvalidTaken, s0_fire)
-  private val s1_instrCount   = RegEnable(s0_realInstrCount, s0_fire)
+  private val s1_fetchBlock         = RegEnable(s0_fixedFetchBlock, s0_fire)
+  private val s1_predTakenIdx       = RegEnable(s0_predTakenIdx, s0_fire)
+  private val s1_invalidTaken       = RegEnable(s0_fixedInvalidTaken, s0_fire)
+  private val s1_instrCount         = RegEnable(s0_realInstrCount, s0_fire)
+  private val s1_secondHasException = RegEnable(s0_secondHasException, s0_fire)
 
   dontTouch(s1_fetchBlock)
 
@@ -394,8 +401,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s2_totalEndHalfRviPc   = RegEnable(s1_totalEndHalfRviPc, s1_fire)
   private val s2_totalEndHalfRviData = RegEnable(s1_totalEndHalfRviData, s1_fire)
 
-  private val s2_instrCount        = RegEnable(s1_instrCount, s1_fire)
-  private val s2_icacheMeta        = RegEnable(s1_icacheMeta, s1_fire)
+  private val s2_instrCount         = RegEnable(s1_instrCount, s1_fire)
+  private val s2_secondHasException = RegEnable(s1_secondHasException, s1_fire)
+  private val s2_icacheMeta         = RegEnable(s1_icacheMeta, s1_fire)
   private val s2_alignedInstrVec   = RegEnable(s1_alignedInstrVec, s1_fire)
   private val s2_alignedInstrPcVec = RegEnable(s1_alignedInstrPcVec, s1_fire)
   private val s2_alignedFoldPc     = RegEnable(s1_alignedFoldPc, s1_fire)
@@ -694,44 +702,69 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val wbTotalEndIsHalfRvi   = RegEnable(s2_totalEndIsHalfRvi, wbEnable)
   private val wbTotalEndHalfRviPc   = RegEnable(s2_totalEndHalfRviPc, wbEnable)
   private val wbTotalEndHalfRviData = RegEnable(s2_totalEndHalfRviData, wbEnable)
+  private val wbSecondHasException  = RegEnable(s2_secondHasException, wbEnable)
 
   s2_wbNotFlush := wbAlignFetchBlock(0).ftqIdx === s2_fetchBlock(0).ftqIdx && s2_valid && wbValid
 
   private val checkerRedirect = checkerOutStage2.checkerRedirect
+  // block-1-only exception: refetch block 1 alone; checker faults win (their redirect already flushes block 1)
+  private val wbSecondExcpFire = wbValid && wbSecondHasException && !checkerRedirect.valid
   private val checkFlushWb = {
     val b         = Wire(Valid(new FrontendRedirect))
     val ftqIdx    = VecInit(wbAlignFetchBlock.map(_.ftqIdx))
     val startAddr = VecInit(wbAlignFetchBlock.map(_.startVAddr.toUInt))
-    b.valid          := wbValid && checkerRedirect.valid
-    b.bits.ftqIdx    := Mux(checkerRedirect.bits.selectBlock, ftqIdx(1), ftqIdx(0))
-    b.bits.pc        := Mux(checkerRedirect.bits.selectBlock, startAddr(1), startAddr(0))
-    b.bits.taken     := checkerRedirect.bits.taken
-    b.bits.ftqOffset := checkerRedirect.bits.endOffset
-    b.bits.isRVC     := checkerRedirect.bits.isRVC
-    b.bits.attribute := checkerRedirect.bits.attribute
-    b.bits.target    := checkerRedirect.bits.target.toUInt
+    b.valid          := wbValid && (checkerRedirect.valid || wbSecondExcpFire)
+    b.bits.ftqIdx    := Mux(checkerRedirect.valid && checkerRedirect.bits.selectBlock, ftqIdx(1), ftqIdx(0))
+    b.bits.pc        := Mux(checkerRedirect.valid && checkerRedirect.bits.selectBlock, startAddr(1), startAddr(0))
+    b.bits.taken     := checkerRedirect.valid && checkerRedirect.bits.taken
+    b.bits.ftqOffset := Mux(
+      checkerRedirect.valid,
+      checkerRedirect.bits.endOffset,
+      wbAlignFetchBlock(0).takenCfiOffset.bits
+    )
+    b.bits.isRVC     := checkerRedirect.valid && checkerRedirect.bits.isRVC
+    b.bits.attribute := Mux(checkerRedirect.valid, checkerRedirect.bits.attribute, BranchAttribute.None)
+    b.bits.target := Mux(
+      checkerRedirect.valid,
+      checkerRedirect.bits.target.toUInt,
+      wbAlignFetchBlock(1).startVAddr.toUInt
+    )
     b
   }
+
+  // the resumed half-RVI stitch requires the refetch to start exactly at the dangling half
+  when(wbSecondExcpFire && wbFirstEndIsHalfRvi) {
+    assert(
+      (wbFirstEndHalfRviPc + 2.U) === wbAlignFetchBlock(1).startVAddr,
+      "block-1 refetch target must resume the cross-block half RVI"
+    )
+  }
+  XSPerfAccumulate("wb_second_block_exception_refetch", wbSecondExcpFire)
 
   toFtq.wbRedirect := Mux(wbValid, checkFlushWb, uncacheFlushWb)
 
   wbRedirect.valid := checkFlushWb.valid
   wbRedirect.isHalfInstr := Mux(
-    !checkerRedirect.bits.selectBlock,
-    wbFirstEndIsHalfRvi,
-    wbTotalEndIsHalfRvi
-  ) && checkerRedirect.bits.invalidTaken
+    checkerRedirect.valid,
+    Mux(
+      !checkerRedirect.bits.selectBlock,
+      wbFirstEndIsHalfRvi,
+      wbTotalEndIsHalfRvi
+    ) && checkerRedirect.bits.invalidTaken,
+    // block-1 refetch: block 0 may end in a cross-block half RVI that was dropped with block 1
+    wbFirstEndIsHalfRvi
+  )
   wbRedirect.instrCount     := wbInstrCount
   wbRedirect.prevIBufEnqPtr := wbPrevIBufEnqPtr
   wbRedirect.halfPc := Mux(
-    !checkerRedirect.bits.selectBlock,
-    wbFirstEndHalfRviPc,
-    wbTotalEndHalfRviPc
+    checkerRedirect.valid && checkerRedirect.bits.selectBlock,
+    wbTotalEndHalfRviPc,
+    wbFirstEndHalfRviPc
   )
   wbRedirect.halfData := Mux(
-    !checkerRedirect.bits.selectBlock,
-    wbFirstEndHalfRviData,
-    wbTotalEndHalfRviData
+    checkerRedirect.valid && checkerRedirect.bits.selectBlock,
+    wbTotalEndHalfRviData,
+    wbFirstEndHalfRviData
   )
 
   private val s1_icachePerfInfo = RegEnable(io.fromICache.perf, s0_fire)
