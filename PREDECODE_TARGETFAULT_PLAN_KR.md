@@ -110,8 +110,12 @@ target이 영원히 남아 **매 fetch마다 predecode redirect가 반복**된�
 ## 4. 한계 (문서화)
 
 1. jalr/ret target은 predecode로 검증 불가 — backend pcMem 비교가 유일한 방어 (Fix A/C).
-2. pair-second 엔트리의 train은 억제되므로 (`Ftq.scala:479`) pair-second에서 세운
-   사이드카는 MBTB에 못 닿는다. s3Override는 pair-first만 덮으므로 확정 버그 경로는 커버.
+2. pair-second 엔트리의 train은 억제되므로 (`Ftq.scala:479`, second 슬롯에는 resolve meta가
+   쓰이지 않는다 — `Ftq.scala:260-280`) 거기서 세운 사이드카는 MBTB에 못 닿는다. 다만
+   pair-second의 target을 만든 주체는 MBTB가 아니라 uBTB pair slot2이고, 그 교정 수단인
+   `mispKill`은 `redirect`(= backend 또는 **IFU** redirect, `Ftq.scala:138`)에서 구동되므로
+   (`Bpu.scala:205-210` → `ubtb/MicroBtb.scala:456-466`) predecode redirect가 잘못된 pair를
+   그 자리에서 무효화한다. 이후 그 블록은 단독 인출되어 정상 학습 경로를 탄다.
 3. 강제 mispredict는 TAGE/SC 등 다른 트레이너에도 mispredict로 보인다 — 의미상 참
    (BPU가 실제로 틀렸음)이므로 허용.
 
