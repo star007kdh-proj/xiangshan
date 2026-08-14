@@ -231,14 +231,19 @@ class Ftq(implicit p: Parameters) extends FtqModule
   when((prediction.fire || bpuS3Redirect) && !redirect.valid) {
     entryQueue(predictionPtr.value).startPc        := prediction.bits.startPc
     entryQueue(predictionPtr.value).takenCfiOffset := prediction.bits.takenCfiOffset
+    entryQueue(predictionPtr.value).target         := prediction.bits.target
     ifuTargetFix(predictionPtr.value)              := false.B
     // pair second entry + sidecar markers; any enqueue to a slot clears its second flag.
     if (EnableTwoTaken) {
       when(pairEnq) {
         val p         = prediction.bits.pair.get
         val secondPtr = predictionPtr + 1.U
+        // the pair first ends at the second's startPc, so take it from there rather than from the
+        // top level target, which describes the pair as a whole.
+        entryQueue(predictionPtr.value).target     := p.secondStartPc
         entryQueue(secondPtr.value).startPc        := p.secondStartPc
         entryQueue(secondPtr.value).takenCfiOffset := p.secondCfiOffset
+        entryQueue(secondPtr.value).target         := p.secondTarget
         ifuTargetFix(secondPtr.value)              := false.B
       }
       isPairFirst(predictionPtr.value)  := pairEnq
@@ -408,12 +413,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
     req.hasBackendException := backendException.hasException && backendExceptionPtr === fetchPtr(i)
   }
 
-  // startPc lookup for the Ifu predecode target check: the entry after a block starts at that
-  // block's predicted taken target. Answer only for entries the Bpu has already enqueued.
-  io.toIfu.nextEntryStartPc.zip(io.fromIfu.nextEntryStartPcQuery).foreach { case (resp, query) =>
-    val nextPtr = query.bits + 1.U
-    resp.valid := query.valid && nextPtr < bpuPtr(0)
-    resp.bits  := entryQueue(nextPtr.value).startPc
+  // predicted target lookup for the Ifu predecode target check
+  io.toIfu.predTarget.zip(io.fromIfu.predTargetQuery).foreach { case (resp, query) =>
+    resp := entryQueue(query.value).target
   }
 
   // --------------------------------------------------------------------------------

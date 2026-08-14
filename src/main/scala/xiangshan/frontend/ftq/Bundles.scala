@@ -34,6 +34,9 @@ import xiangshan.frontend.icache.PrefetchReqBundle
 class FtqEntry(implicit p: Parameters) extends FtqBundle {
   val startPc:        PrunedAddr  = PrunedAddr(VAddrBits)
   val takenCfiOffset: Valid[UInt] = Valid(UInt(CfiPositionWidth.W))
+  // predicted target of this block's taken cfi, i.e. the startPc the next entry will get. Kept per
+  // entry so it is readable even before the next entry is enqueued (bpu parked, s3 override rollback).
+  val target: PrunedAddr = PrunedAddr(VAddrBits)
 }
 
 class MetaEntry(implicit p: Parameters) extends FtqBundle {

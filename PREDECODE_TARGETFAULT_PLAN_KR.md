@@ -13,48 +13,56 @@ pcMem 비교가 마스킹될 수 있다. Fix A(backend 방어)와 독립으로, 
 
 ## 2. 구조적 제약과 설계 결정
 
-- 이 트리는 예측 target이 IFU에 전달되지 않는다: `FetchRequestBundle.target`은 미구동
-  필드이고, `FtqEntry`는 startPc + takenCfiOffset만 저장 (`ftq/Bundles.scala:34-37`).
-- 예측 target의 유일한 소스 = **successor FTQ 엔트리의 startPc** (다음 예측이 target에서
-  시작하므로 구조적으로 동일).
+- 예측 target은 원래 IFU에 전달되지 않았다: `FetchRequestBundle.target`은 미구동 필드이고,
+  `FtqEntry`는 startPc + takenCfiOffset만 저장했다.
+- **다음 엔트리의 startPc로 유추하는 방식은 기각**: 그 값은 다음 엔트리가 enqueue된 뒤에만
+  읽을 수 있는데, s3Override는 `bpuPtr := s3FtqPtr + 1`로 되감아 (`Ftq.scala:218-220`) 해당
+  블록을 최신 엔트리로 만들고, FTQ full이면 `prediction.ready`가 죽어 (`Ftq.scala:175-178`)
+  그 상태가 커밋으로 자리가 날 때까지 유지된다. 즉 **확정된 버그 상황에서 정확히 읽을 수
+  없는** 값이다.
 - fault 처리(IBuffer 롤백, half-RVI 복구, prevIBufEnqPtr 복원)는 전부 IFU 내부
   `wbRedirect` 머신에 묶여 있어 (`Ifu.scala:746-765`), 검출은 반드시 **PredChecker 안**에서
   기존 fault와 같은 방식으로 일어나야 한다. FTQ에서 비교하는 설계는 IBuffer 롤백을
   재구현해야 해서 기각.
 
-**결정**: IFU가 s1에서 각 fetch block의 ftqIdx를 FTQ에 질의 → FTQ가 조합논리로
-`entryQueue[ftqIdx+1].startPc`(+ successor 존재 여부)를 응답 → s2에서 레지스터 후
-PredChecker에 공급 → PredChecker가 디코드 target(`jumpTargets`)과 비교해 targetFault를
-**기존 remask fault와 동일하게** 처리.
+**결정**: `FtqEntry`에 `target` 필드를 추가해 엔트리가 자기 예측 target을 들고 있게 한다.
+IFU가 s1에서 fetch block의 ftqIdx로 질의 → FTQ가 `entryQueue[ftqIdx].target`을 조합으로
+응답 → s2에서 레지스터 후 PredChecker에 공급 → PredChecker가 디코드 target(`jumpTargets`)과
+비교해 targetFault를 **기존 remask fault와 동일하게** 처리. enqueue 여부에 의존하지 않으므로
+스킵 조건이 없다.
 
 ## 3. 변경 내용
 
-### 3.1 검출 + redirect (commit 1)
+### 3.1 검출 + redirect
+
+**`frontend/ftq/Bundles.scala`**
+- `FtqEntry`에 `target: PrunedAddr` 추가 (엔트리당 `VAddrBits - instOffsetBits` 비트 × FtqSize=64)
 
 **`frontend/Bundles.scala`**
-- `IfuToFtqIO`: `nextEntryStartPcQuery: Vec(FetchPorts, Valid[FtqPtr])` 추가 (IFU→FTQ, s1 질의)
-- `FtqToIfuIO`: `nextEntryStartPc: Vec(FetchPorts, Valid[PrunedAddr])` 추가 (조합 응답)
+- `IfuToFtqIO`: `predTargetQuery: Vec(FetchPorts, FtqPtr)` 추가 (IFU→FTQ, s1 질의)
+- `FtqToIfuIO`: `predTarget: Vec(FetchPorts, PrunedAddr)` 추가 (조합 응답)
 
-**`frontend/ftq/Ftq.scala`** — 질의 응답
-- `resp.valid := query.valid && (query.bits + 1) < bpuPtr(0)` — 다음 엔트리가 아직 enqueue 안 됐으면
-  invalid → 검사 스킵 (BPU park 직후 레이스 창; 이때는 Fix A가 커버)
-- `resp.bits := entryQueue((q.bits + 1).value).startPc`
-- **레이스 분석 (구현 후 검증)**: 블록 A가 IFU s1에 있을 때 `entryQueue[A+1].startPc`가
-  다른 스트림 값으로 바뀔 수 있는가?
-  1. s3Override가 A+1을 타겟하는 경우 — override는 그 엔트리의 takenCfiOffset/target만
-     바꾸고 startPc는 s3_startPc(=s1이 넣은 값)로 그대로 다시 쓴다. 즉 startPc 불변.
-  2. A+1의 startPc가 바뀌려면 bpuPtr이 A+1 이하로 롤백해야 하고, 이는 A 이하를 타겟하는
-     override/redirect를 뜻한다. override 도달 범위는 `bpuToPfSafeDist = 1 + bpuS2EnqNum +
-     bpuS3EnqNum` (`Ftq.scala:334-335`)로 bpuPtr에서 최대 3엔트리이며, FTQ enqueue → ICache
-     prefetch/mainpipe(3단) → IFU s0 까지 최소 4~5 cycle이 걸리므로 IFU s1의 블록은 항상
-     override 사거리 밖이다 (기존 설계가 `flushFromBpu`를 s0에서만 검사하는 근거와 동일,
-     `Ifu.scala:139`). backend/IFU redirect는 IFU 파이프라인을 전부 flush (`Ifu.scala:114-117`).
-  ⇒ s1 질의 결과는 wb까지 이 fetch 스트림에 대해 유효하다.
+**`frontend/ftq/Ftq.scala`**
+- enqueue 시 `entryQueue(predictionPtr).target := prediction.bits.target` — 이 쓰기 블록은
+  일반 enqueue와 s3Override를 모두 덮으므로 (`predictionPtr`이 override 시 s3FtqPtr) override된
+  target이 자동 반영된다. in-flight 갱신 로직 불필요.
+- pair: first의 target은 `p.secondStartPc`(= second의 시작 = first의 target)로, second의 target은
+  `p.secondTarget`(`bpu/Bundles.scala:198`)으로 명시 지정 — 상위 `prediction.bits.target`은 pair
+  전체를 기술하므로 first에 그대로 쓰면 안 된다.
+- 질의 응답: `resp := entryQueue(query.value).target`
+- **레이스 분석**: 엔트리 A가 IFU s1에 있을 때 `entryQueue[A].target`이 다른 스트림 값으로
+  바뀌려면 bpuPtr이 A 이하로 롤백해야 한다. override 도달 범위는 `bpuToPfSafeDist =
+  1 + bpuS2EnqNum + bpuS3EnqNum` (`Ftq.scala:334-335`)로 bpuPtr에서 최대 3엔트리인데, FTQ
+  enqueue → ICache prefetch/mainpipe(3단) → IFU s0 까지 최소 4~5 cycle이 걸리므로 IFU s1의
+  블록은 항상 override 사거리 밖이다 (기존 설계가 `flushFromBpu`를 s0에서만 검사하는 근거와
+  동일, `Ifu.scala:139`). backend/IFU redirect는 IFU 파이프라인을 전부 flush
+  (`Ifu.scala:114-117`). ⇒ s1 질의 결과는 wb까지 유효하다.
 
 **`frontend/ifu/Ifu.scala`**
-- s1: `nextEntryStartPcQuery(i) := {s1_valid && s1_fetchBlock(i).valid, s1_fetchBlock(i).ftqIdx}`
-- s2: 응답을 `RegEnable(_, s1_fire)`로 latch, ICache exception 블록은 valid 강제 해제
-  (garbage 디코드로 인한 오발 방지) 후 `checkerIn.bits.blockPredTarget`으로 전달
+- s1: `predTargetQuery(i) := s1_fetchBlock(i).ftqIdx`
+- s2: 응답을 `RegEnable(_, s1_fire)`로 latch → `checkerIn.bits.blockPredTarget`으로 전달.
+  valid는 `s2_fetchBlock(i).valid && takenCfiOffset.valid`이며, ICache exception 블록과
+  uncache는 해제 (garbage 디코드로 인한 오발 방지)
 
 **`frontend/ifu/PredChecker.scala`**
 - req에 `blockPredTarget: Vec(FetchPorts, Valid[PrunedAddr])` 추가
@@ -68,7 +76,7 @@ PredChecker에 공급 → PredChecker가 디코드 target(`jumpTargets`)과 비�
 
 **`frontend/ifu/IfuPerfAnalysis.scala`** — `checkTargetFault` 실연결
 
-### 3.2 재학습 경로 (commit 2)
+### 3.2 재학습 경로
 
 문제: MBTB는 `train.branches`의 `mispredict=true`인 branch만 갱신한다
 (`mbtb/MainBtb.scala:272`). predecode redirect가 fetch를 고쳐버리면 backend에서는
@@ -96,15 +104,15 @@ target이 영원히 남아 **매 fetch마다 predecode redirect가 반복**된�
   ground truth다. 즉 오탐은 **정확성이 아니라 IPC만** 해친다.
 - 타이밍: s1의 ftqIdx(레지스터 출력) → FTQ entryQueue mux → IFU s2 레지스터 입력의
   모듈 간 조합 경로가 새로 생긴다. 기존 pfPtr/ifuPtr 읽기와 같은 급이지만 FPGA STA에서
-  확인 필요 (TODO(timing)).
+  확인 필요 (TODO(timing)). 더 줄이려면 `FtqFetchReq`/`MainPipeToIfuReq`에 target을 실어
+  ICache 파이프라인으로 흘리면 되지만, WayLookup 큐에 저장이 추가된다.
 
 ## 4. 한계 (문서화)
 
-1. 다음 엔트리 미-enqueue 시(질의 시점에 BPU가 바로 뒤) 검사 스킵 — Fix A가 커버.
-2. jalr/ret target은 predecode로 검증 불가 — backend pcMem 비교가 유일한 방어 (Fix A/C).
-3. pair-second 엔트리의 train은 억제되므로 (`Ftq.scala:479`) pair-second에서 세운
+1. jalr/ret target은 predecode로 검증 불가 — backend pcMem 비교가 유일한 방어 (Fix A/C).
+2. pair-second 엔트리의 train은 억제되므로 (`Ftq.scala:479`) pair-second에서 세운
    사이드카는 MBTB에 못 닿는다. s3Override는 pair-first만 덮으므로 확정 버그 경로는 커버.
-4. 강제 mispredict는 TAGE/SC 등 다른 트레이너에도 mispredict로 보인다 — 의미상 참
+3. 강제 mispredict는 TAGE/SC 등 다른 트레이너에도 mispredict로 보인다 — 의미상 참
    (BPU가 실제로 틀렸음)이므로 허용.
 
 ## 5. 검증
