@@ -413,9 +413,17 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // pair second entry: write its startPc to the backend pc mem via the second port
   // (the first port only covers predictionPtr; otherwise its pc mem stays stale).
   if (EnableTwoTaken) {
-    io.toBackend.pairWen.get     := pairEnq
-    io.toBackend.pairFtqIdx.get  := (predictionPtr + 1.U).value
-    io.toBackend.pairStartPc.get := prediction.bits.pair.get.secondStartPc
+    // s3Override reuses this port (mutually exclusive with pairEnq) to refresh the rolled-back
+    // successor slot; a stale value equal to the real target would mask the backend target check.
+    val s3OverrideFixup = bpuS3Redirect && !redirect.valid
+    io.toBackend.pairWen.get    := pairEnq || s3OverrideFixup
+    io.toBackend.pairFtqIdx.get := (predictionPtr + 1.U).value
+    io.toBackend.pairStartPc.get := Mux(
+      s3OverrideFixup,
+      prediction.bits.target,
+      prediction.bits.pair.get.secondStartPc
+    )
+    XSPerfAccumulate("s3OverridePcMemFixup", s3OverrideFixup)
   }
 
   // --------------------------------------------------------------------------------
