@@ -106,6 +106,10 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val isPairSecond      = RegInit(VecInit.fill(FtqSize)(false.B))
   private val pairSecondStartPc = Reg(Vec(FtqSize, PrunedAddr(VAddrBits)))
 
+  // set when predecode redirected a block for a wrong direct target; the backend then sees a pc mem
+  // that Ftq already corrected, so its resolve carries no mispredict and MainBtb would never relearn.
+  private val ifuTargetFix = RegInit(VecInit.fill(FtqSize)(false.B))
+
   // metaQueue stores information needed to train BPU.
   private val metaQueueResolve = Reg(Vec(FtqSize, new BpuResolveMeta))
   private val metaQueueCommit  = Reg(Vec(FtqSize, new BpuCommitMeta))
@@ -227,6 +231,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   when((prediction.fire || bpuS3Redirect) && !redirect.valid) {
     entryQueue(predictionPtr.value).startPc        := prediction.bits.startPc
     entryQueue(predictionPtr.value).takenCfiOffset := prediction.bits.takenCfiOffset
+    ifuTargetFix(predictionPtr.value)              := false.B
     // pair second entry + sidecar markers; any enqueue to a slot clears its second flag.
     if (EnableTwoTaken) {
       when(pairEnq) {
@@ -234,6 +239,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
         val secondPtr = predictionPtr + 1.U
         entryQueue(secondPtr.value).startPc        := p.secondStartPc
         entryQueue(secondPtr.value).takenCfiOffset := p.secondCfiOffset
+        ifuTargetFix(secondPtr.value)              := false.B
       }
       isPairFirst(predictionPtr.value)  := pairEnq
       isPairSecond(predictionPtr.value) := false.B // any enqueue to a slot clears its second flag
@@ -402,6 +408,14 @@ class Ftq(implicit p: Parameters) extends FtqModule
     req.hasBackendException := backendException.hasException && backendExceptionPtr === fetchPtr(i)
   }
 
+  // startPc lookup for the Ifu predecode target check: the entry after a block starts at that
+  // block's predicted taken target. Answer only for entries the Bpu has already enqueued.
+  io.toIfu.nextEntryStartPc.zip(io.fromIfu.nextEntryStartPcQuery).foreach { case (resp, query) =>
+    val nextPtr = query.bits + 1.U
+    resp.valid := query.valid && nextPtr < bpuPtr(0)
+    resp.bits  := entryQueue(nextPtr.value).startPc
+  }
+
   // --------------------------------------------------------------------------------
   // Interaction with backend
   // --------------------------------------------------------------------------------
@@ -480,8 +494,28 @@ class Ftq(implicit p: Parameters) extends FtqModule
   resolveQueue.io.bpuTrain.ready := io.toBpu.train.ready
   io.toBpu.train.bits.meta       := metaQueueResolve(trainFtqIdx)
   io.toBpu.train.bits.startPc    := resolveQueue.io.bpuTrain.bits.startPc
-  io.toBpu.train.bits.branches   := resolveQueue.io.bpuTrain.bits.branches
   io.toBpu.train.bits.perfMeta   := perfQueue(trainFtqIdx).bpuPerf
+
+  // the taken cfi of an entry predecode had to fix was mispredicted, whatever the backend resolve says
+  private val trainTargetFix = ifuTargetFix(trainFtqIdx)
+  io.toBpu.train.bits.branches.zip(resolveQueue.io.bpuTrain.bits.branches).foreach { case (out, in) =>
+    out := in
+    when(trainTargetFix && in.valid && in.bits.taken) {
+      out.bits.mispredict := true.B
+    }
+  }
+  private val trainDequeue = resolveQueue.io.bpuTrain.valid && resolveQueue.io.bpuTrain.ready
+  when(trainDequeue) {
+    ifuTargetFix(trainFtqIdx) := false.B
+  }
+  XSPerfAccumulate("trainForceMispredictIfuFix", trainDequeue && trainTargetFix)
+
+  // a predecode redirect on a direct cfi corrects the fetch path itself, so mark the entry to force
+  // its train later; the backend resolve alone would look correct and leave MainBtb untrained.
+  when(ifuRedirect.valid && !backendRedirect.valid && ifuRedirect.bits.taken &&
+    !ifuRedirect.bits.attribute.isIndirect) {
+    ifuTargetFix(ifuRedirect.bits.ftqIdx.value) := true.B
+  }
   if (EnableTwoTaken) {
     XSPerfAccumulate("pairSecondTrainSuppressed", resolveQueue.io.bpuTrain.valid && trainIsPairSecond)
   }

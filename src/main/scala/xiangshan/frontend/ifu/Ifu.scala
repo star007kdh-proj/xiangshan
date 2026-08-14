@@ -273,6 +273,13 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_icacheMeta  = RegEnable(s0_icacheMeta, s0_fire)
   private val s1_instrVec    = RegEnable(s0_realInstrVec, s0_fire)
 
+  // the entry after a block starts at that block's predicted taken target, so ask Ftq for it and let
+  // predecode check direct cfi targets itself instead of leaving it to the backend pc mem compare.
+  toFtq.nextEntryStartPcQuery.zipWithIndex.foreach { case (query, i) =>
+    query.valid := s1_valid && s1_fetchBlock(i).valid && s1_fetchBlock(i).takenCfiOffset.valid
+    query.bits  := s1_fetchBlock(i).ftqIdx
+  }
+
   private val s1_predTakenMask = VecInit((0 until FetchPorts).map { i =>
     Mux(
       s1_fetchBlock(i).valid && s1_fetchBlock(i).takenCfiOffset.valid,
@@ -513,11 +520,19 @@ class Ifu(implicit p: Parameters) extends IfuModule
   s2_ready := (io.toIBuffer.ready && (s2_uncacheCanGo || !s2_reqIsUncache)) || !s2_valid
 
   /* ** prediction result check ** */
+  // an exception block holds no usable instruction data, so its decoded target cannot be trusted
+  private val s2_anyException     = s2_icacheMeta.map(_.exception.hasException).reduce(_ || _)
+  private val s2_nextEntryStartPc = RegEnable(fromFtq.nextEntryStartPc, s1_fire)
+
   checkerIn.valid                 := s2_valid
   checkerIn.bits.jumpOffsetVec    := s2_jumpOffsetVec
   checkerIn.bits.pdInfoVec        := s2_pdInfoVec
   checkerIn.bits.instrPcVec       := s2_alignedInstrPcVec
   checkerIn.bits.expandedInstrVec := s2_expandedInstrVec
+  checkerIn.bits.blockPredTarget.zip(s2_nextEntryStartPc).foreach { case (predTarget, nextEntry) =>
+    predTarget.valid := nextEntry.valid && !s2_anyException && !s2_reqIsUncache
+    predTarget.bits  := nextEntry.bits
+  }
 
   private val s2_fixedInstrValid = checkerOutStage1.fixedInstrValid.asUInt
   dontTouch(s2_fixedInstrValid)

@@ -142,6 +142,10 @@ class FtqToIfuIO(implicit p: Parameters) extends FrontendBundle {
   val redirect:     Valid[Redirect]       = Valid(new Redirect)
   val flushFromBpu: BpuFlushInfo          = new BpuFlushInfo
   val topdownInfo:  FrontendTopDownBundle = new FrontendTopDownBundle
+
+  // combinational answer to nextEntryStartPcQuery: the next entry's startPc, i.e. the predicted
+  // target of this block's taken cfi. Invalid when that entry is not enqueued yet.
+  val nextEntryStartPc: Vec[Valid[PrunedAddr]] = Output(Vec(FetchPorts, Valid(PrunedAddr(VAddrBits))))
 }
 
 class FrontendRedirect(implicit p: Parameters) extends FrontendBundle {
@@ -157,6 +161,9 @@ class FrontendRedirect(implicit p: Parameters) extends FrontendBundle {
 
 class IfuToFtqIO(implicit p: Parameters) extends FrontendBundle {
   val wbRedirect: Valid[FrontendRedirect] = Valid(new FrontendRedirect)
+
+  // ask Ftq for the next entry's startPc, so predecode can check the predicted target
+  val nextEntryStartPcQuery: Vec[Valid[FtqPtr]] = Output(Vec(FetchPorts, Valid(new FtqPtr)))
 }
 
 class ExceptionType extends Bundle {

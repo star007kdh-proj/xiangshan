@@ -139,6 +139,7 @@ class IfuPerfAnalysis(implicit p: Parameters) extends IfuModule {
     checkRetFault(i)     := validFetch && (checkFaultType(i) === PreDecodeFaultType.RetFault)
     checkNotCFIFault(i)  := validFetch && (checkFaultType(i) === PreDecodeFaultType.NotCfiFault)
     checkInvalidTaken(i) := validFetch && (checkFaultType(i) === PreDecodeFaultType.InvalidTaken)
+    checkTargetFault(i)  := validFetch && (checkFaultType(i) === PreDecodeFaultType.TargetFault)
   }
 
   for (i <- 0 until FetchPorts) {

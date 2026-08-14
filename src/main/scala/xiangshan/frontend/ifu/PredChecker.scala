@@ -36,6 +36,8 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
       val jumpOffsetVec:    Vec[PrunedAddr]    = Vec(IBufferEnqueueWidth, PrunedAddr(VAddrBits))
       val pdInfoVec:        Vec[PreDecodeInfo] = Vec(IBufferEnqueueWidth, new PreDecodeInfo)
       val instrPcVec:       Vec[PrunedAddr]    = Vec(IBufferEnqueueWidth, PrunedAddr(VAddrBits))
+      // per fetch block, the predicted target of its taken cfi (successor entry startPc from Ftq)
+      val blockPredTarget: Vec[Valid[PrunedAddr]] = Vec(FetchPorts, Valid(PrunedAddr(VAddrBits)))
     }
 
     class PredCheckerResp(implicit p: Parameters) extends IfuBundle {
@@ -70,6 +72,11 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
   private val jumpOffsetVec = io.req.bits.jumpOffsetVec
 
   private val jalFaultVec, jalrFaultVec, retFaultVec, notCfiTaken = Wire(Vec(IBufferEnqueueWidth, Bool()))
+  private val targetFaultVec                                      = Wire(Vec(IBufferEnqueueWidth, Bool()))
+
+  private val jumpTargets = VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
+    (instrPcVec(i) + jumpOffsetVec(i)).asTypeOf(PrunedAddr(VAddrBits))
+  })
 
   /** Remask faults can occur alongside other faults, whereas other faults are mutually exclusive.
     * Therefore, for non-remask faults, a fixed fault mask must be used to ensure that only one fault
@@ -91,10 +98,18 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
   notCfiTaken := VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
     instrValid(i) && pd.notCFI && isPredTaken(i)
   })
+  // a direct cfi carries its target in the instruction, so the prediction can be checked here instead
+  // of waiting for the backend, whose own check reads a pc mem that may still hold a stale successor.
+  targetFaultVec := VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
+    val predTarget = Mux(blockSel(i), io.req.bits.blockPredTarget(1), io.req.bits.blockPredTarget(0))
+    instrValid(i) && isPredTaken(i) && !invalidTaken(i) && (pd.isJal || pd.isBr) &&
+    predTarget.valid && jumpTargets(i) =/= predTarget.bits
+  })
 
   private val remaskFault =
     VecInit((0 until IBufferEnqueueWidth).map(i =>
-      jalFaultVec(i) || jalrFaultVec(i) || retFaultVec(i) || invalidTaken(i) || notCfiTaken(i)
+      jalFaultVec(i) || jalrFaultVec(i) || retFaultVec(i) || invalidTaken(i) || notCfiTaken(i) ||
+        targetFaultVec(i)
     ))
   // Timing optimization: prefixOr is implemented as a parallel prefix tree (recursive bisection),
   // which retains all valid instruction entries before the first fault occurs (including the fault position itself).
@@ -119,7 +134,8 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
 
   private val mispredIdx = WireDefault(0.U.asTypeOf(ValidUndirectioned(UInt(log2Ceil(IBufferEnqueueWidth).W))))
   private val stage1Fault = VecInit.tabulate(IBufferEnqueueWidth)(i =>
-    jalFaultVec(i) || jalrFaultVec(i) || retFaultVec(i) || notCfiTaken(i) || invalidTaken(i)
+    jalFaultVec(i) || jalrFaultVec(i) || retFaultVec(i) || notCfiTaken(i) || invalidTaken(i) ||
+      targetFaultVec(i)
   )
   dontTouch(stage1Fault.asUInt)
   mispredIdx.valid := ParallelOR(stage1Fault)
@@ -128,10 +144,6 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
   private val seqTargets = VecInit((0 until IBufferEnqueueWidth).map(i =>
     instrPcVec(i) + Mux(pdInfoVec(i).isRVC || invalidTaken(i), 2.U, 4.U)
   ))
-
-  private val jumpTargets = VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
-    (instrPcVec(i) + jumpOffsetVec(i)).asTypeOf(PrunedAddr(VAddrBits))
-  })
 
   private val fixedIsJump =
     instrValid(mispredIdx.bits) &&
@@ -184,6 +196,7 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
   private val jalrFaultVecNext = RegEnable(jalrFaultVec, io.req.valid)
   private val retFaultVecNext  = RegEnable(retFaultVec, io.req.valid)
   private val notCFITakenNext  = RegEnable(notCfiTaken, io.req.valid)
+  private val targetFaultNext  = RegEnable(targetFaultVec, io.req.valid)
 
   private val faultType = MuxCase(
     PreDecodeFaultType.NoFault,
@@ -192,7 +205,8 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
       jalrFaultVecNext(mispredIdxNext.bits) -> PreDecodeFaultType.JalrFault,
       retFaultVecNext(mispredIdxNext.bits)  -> PreDecodeFaultType.RetFault,
       notCFITakenNext(mispredIdxNext.bits)  -> PreDecodeFaultType.NotCfiFault,
-      invalidTakenNext(mispredIdxNext.bits) -> PreDecodeFaultType.InvalidTaken
+      invalidTakenNext(mispredIdxNext.bits) -> PreDecodeFaultType.InvalidTaken,
+      targetFaultNext(mispredIdxNext.bits)  -> PreDecodeFaultType.TargetFault
     )
   )
 
