@@ -79,16 +79,20 @@ class BpuFlushInfo(implicit p: Parameters) extends FtqBundle with HasCircularQue
 }
 
 class FtqToCtrlIO(implicit p: Parameters) extends FtqBundle {
-  // write to backend pc mem
+  // write to backend pc mem and target mem
   val wen:     Bool       = Output(Bool())
   val ftqIdx:  UInt       = Output(UInt(FtqPtr.width.W))
   val startPc: PrunedAddr = Output(PrunedAddr(VAddrBits))
+  // predicted target of this entry's taken cfi, sent with the entry itself so the backend target
+  // check never depends on the (later, revocable) enqueue of the successor entry.
+  val target: PrunedAddr = Output(PrunedAddr(VAddrBits))
 
   // second pc mem write port for a pair enqueue (the port above covers only the first entry).
   private val enableTwoTaken: Boolean = p(XSCoreParamsKey).frontendParameters.bpuParameters.EnableTwoTaken
   val pairWen:     Option[Bool]       = if (enableTwoTaken) Some(Output(Bool())) else None
   val pairFtqIdx:  Option[UInt]       = if (enableTwoTaken) Some(Output(UInt(FtqPtr.width.W))) else None
   val pairStartPc: Option[PrunedAddr] = if (enableTwoTaken) Some(Output(PrunedAddr(VAddrBits))) else None
+  val pairTarget:  Option[PrunedAddr] = if (enableTwoTaken) Some(Output(PrunedAddr(VAddrBits))) else None
 }
 
 class PerfMeta(implicit p: Parameters) extends FtqBundle {

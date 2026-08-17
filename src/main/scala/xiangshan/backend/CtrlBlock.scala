@@ -79,7 +79,6 @@ class CtrlBlockImp(
     "memPredStore"  -> 1,
     "robFlush"  -> 1,
     "bjuPc"     -> params.BrhCnt,
-    "bjuTarget" -> params.BrhCnt,
     "load"      -> params.LduCnt,
     "hybrid"    -> params.HyuCnt,
     "store"     -> (if(EnableStorePrefetchSMS) params.StaCnt else 0),
@@ -105,6 +104,12 @@ class CtrlBlockImp(
   private val numPcMemWrite:  Int     = if (enableTwoTaken) 2 else 1
   private val pcMem =
     Module(new SyncDataModuleTemplate(PrunedAddr(VAddrBits), FtqSize, numPcMemRead, numPcMemWrite, "BackendPC", hasRen = hasRen))
+  // predicted target of each ftq entry's taken cfi, written at that entry's own enqueue and read at
+  // ftqIdx; reading the successor's startPc (pcMem[ftqIdx+1]) instead can return a stale value when
+  // the successor enqueue is rolled back or delayed, silently masking the target check.
+  private val targetMem = Module(new SyncDataModuleTemplate(
+    PrunedAddr(VAddrBits), FtqSize, params.BrhCnt, numPcMemWrite, "BackendPredTarget", hasRen = hasRen
+  ))
   private val rob = wrapper.rob.module
   private val memCtrl = Module(new MemCtrl(params))
 
@@ -242,13 +247,10 @@ class CtrlBlockImp(
     io.toDataPath.pcToDataPathIO.toDataPathPC(i) := pcMem.io.rdata(pcMemIdx).toUInt
   }
 
-  for ((pcMemIdx, i) <- pcMemRdIndexes("bjuTarget").zipWithIndex) {
-    val ren = io.toDataPath.pcToDataPathIO.fromDataPathValid(i)
-    val baseAddr = io.toDataPath.pcToDataPathIO.fromDataPathFtqPtr(i).value
-    val raddr = io.toDataPath.pcToDataPathIO.fromDataPathFtqPtr(i).value + 1.U
-    pcMem.io.ren.get(pcMemIdx) := ren
-    pcMem.io.raddr(pcMemIdx) := raddr
-    io.toDataPath.pcToDataPathIO.toDataPathTargetPC(i) := pcMem.io.rdata(pcMemIdx).toUInt
+  for (i <- 0 until params.BrhCnt) {
+    targetMem.io.ren.get(i) := io.toDataPath.pcToDataPathIO.fromDataPathValid(i)
+    targetMem.io.raddr(i) := io.toDataPath.pcToDataPathIO.fromDataPathFtqPtr(i).value
+    io.toDataPath.pcToDataPathIO.toDataPathTargetPC(i) := targetMem.io.rdata(i).toUInt
   }
 
   val baseIdx = params.BrhCnt
@@ -749,11 +751,17 @@ class CtrlBlockImp(
   pcMem.io.wen.head   := GatedValidRegNext(io.frontend.fromFtq.wen)
   pcMem.io.waddr.head := RegEnable(io.frontend.fromFtq.ftqIdx, io.frontend.fromFtq.wen)
   pcMem.io.wdata.head := RegEnable(io.frontend.fromFtq.startPc, io.frontend.fromFtq.wen)
+  targetMem.io.wen.head   := GatedValidRegNext(io.frontend.fromFtq.wen)
+  targetMem.io.waddr.head := RegEnable(io.frontend.fromFtq.ftqIdx, io.frontend.fromFtq.wen)
+  targetMem.io.wdata.head := RegEnable(io.frontend.fromFtq.target, io.frontend.fromFtq.wen)
   if (enableTwoTaken) {
     val pairWen = io.frontend.fromFtq.pairWen.get
     pcMem.io.wen(1)   := GatedValidRegNext(pairWen)
     pcMem.io.waddr(1) := RegEnable(io.frontend.fromFtq.pairFtqIdx.get, pairWen)
     pcMem.io.wdata(1) := RegEnable(io.frontend.fromFtq.pairStartPc.get, pairWen)
+    targetMem.io.wen(1)   := GatedValidRegNext(pairWen)
+    targetMem.io.waddr(1) := RegEnable(io.frontend.fromFtq.pairFtqIdx.get, pairWen)
+    targetMem.io.wdata(1) := RegEnable(io.frontend.fromFtq.pairTarget.get, pairWen)
   }
 
   io.toDataPath.flush := s2_s4_redirect

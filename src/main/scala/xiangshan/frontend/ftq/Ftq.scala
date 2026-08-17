@@ -406,16 +406,34 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // Interaction with backend
   // --------------------------------------------------------------------------------
 
-  io.toBackend.wen     := (prediction.fire || bpuS3Redirect) && !redirect.valid
-  io.toBackend.ftqIdx  := predictionPtr.value
-  io.toBackend.startPc := prediction.bits.startPc
+  // an ifu redirect moves the entry's resume point without re-enqueue, so refresh targetMem through
+  // the idle first port; pcMem shares the port and rewrites its own startPc, unchanged.
+  private val ifuRedirectTargetFix = ifuRedirect.valid && !backendRedirect.valid
 
-  // pair second entry: write its startPc to the backend pc mem via the second port
+  io.toBackend.wen := (prediction.fire || bpuS3Redirect) && !redirect.valid || ifuRedirectTargetFix
+  io.toBackend.ftqIdx := Mux(ifuRedirectTargetFix, ifuRedirect.bits.ftqIdx.value, predictionPtr.value)
+  io.toBackend.startPc := Mux(
+    ifuRedirectTargetFix,
+    entryQueue(ifuRedirect.bits.ftqIdx.value).startPc,
+    prediction.bits.startPc
+  )
+  // the pair first ends at the second's startPc; the top level target describes the pair as a whole
+  io.toBackend.target := Mux(
+    ifuRedirectTargetFix,
+    PrunedAddrInit(ifuRedirect.bits.target),
+    prediction.bits.pair
+      .map(p => Mux(pairEnq, p.secondStartPc, prediction.bits.target))
+      .getOrElse(prediction.bits.target)
+  )
+  XSPerfAccumulate("ifuRedirectTargetMemFix", ifuRedirectTargetFix)
+
+  // pair second entry: write its startPc/target to the backend via the second port
   // (the first port only covers predictionPtr; otherwise its pc mem stays stale).
   if (EnableTwoTaken) {
     io.toBackend.pairWen.get     := pairEnq
     io.toBackend.pairFtqIdx.get  := (predictionPtr + 1.U).value
     io.toBackend.pairStartPc.get := prediction.bits.pair.get.secondStartPc
+    io.toBackend.pairTarget.get  := prediction.bits.pair.get.secondTarget
   }
 
   // --------------------------------------------------------------------------------

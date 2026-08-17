@@ -92,7 +92,36 @@
   `toDataPathTargetPC(i) := targetMem.io.rdata(i)`.
 - DataPath 이후(BranchUnit/JumpUnit 포함)는 **무변경** — 값의 출처만 바뀜.
 
-### 4.4 인터페이스 배선
+### 4.4 ifuRedirect 시 targetMem 갱신 (구현 후 리뷰에서 추가)
+
+- 문제: predecode redirect(jalFault 등)는 entry N의 후속 fetch 경로를 바꾸지만 entry N을
+  재-enqueue하지 않음. 구 pcMem[N+1] 체계는 정정 target이 재-enqueue로 자동 반영되어 backend
+  비교가 조용히 통과했으나, targetMem[N]은 정정 전 예측값을 유지 → 해당 CFI issue 시
+  `targetWrong=1` → 이미 올바른 경로에 **중복 backend flush** 발생 (정확성 무해, IPC 손실).
+- 수정: ifuRedirect 채택 사이클(`ifuRedirect.valid && !backendRedirect.valid`)에 유휴 상태인
+  첫 write 포트로 `targetMem[ftqIdx] := ifuRedirect.target` 기록. retFault는 receiver가 이미
+  RAS specTopAddr로 mux한 값 (`IfuRedirectReceiver.scala:39`).
+- 공유 포트 처리: port0 wen은 pcMem에도 물려 있으므로 `startPc`에 해당 엔트리의 기존
+  `entryQueue[ftqIdx].startPc`를 실어 동일값 재기록으로 무해화. redirect 사이클엔 enqueue가
+  게이트되어(`!redirect.valid`) 포트 충돌 없음.
+- 학습 무영향: jalFault의 mBTB 학습은 uop 동반 `predTaken=0` → `needTrain=1`
+  (`JumpUnit.scala:44`) 경로라 targetMem과 무관하게 정상 동작.
+- 레이스: 쓰기는 wb+2 사이클에 landing, 해당 CFI의 최단 issue는 그보다 수 사이클 뒤. 만에
+  하나 issue가 앞서도 결과는 중복 redirect(수정 전 동작)로 안전.
+
+### 4.5 backendRedirect(load replay 포함)는 무변경 — 근거
+
+- flushAfter(분기/jalr 오예측): redirect 소스 CFI의 비교는 이미 완료. 같은 엔트리의 더 오래된
+  uop 중 target 비교 대상은 구조적으로 부재 — taken 예측 CFI는 블록을 끝내므로 그 앞에 direct/
+  indirect CFI가 있었다면 predecode fault로 이미 블록이 거기서 끝났어야 하고, not-taken 조건
+  분기는 `fixedTaken=0`으로 비교 게이트 off (`BranchUnit.scala:55`).
+- flushItself(load replay·memory violation·exception): refetch는 새 엔트리 N+1부터 시작하고
+  entry N은 재-enqueue되지 않음. 생존 uop 중 비교 대상이 없는 근거는 위와 동일 (taken CFI 뒤에
+  load가 같은 엔트리에 존재할 수 없음). 구 체계에서 pcMem[N+1]이 load pc로 덮여도 무해했던
+  것과 같은 논리.
+- 결론: redirect 계열 중 targetMem 갱신이 필요한 것은 ifuRedirect뿐.
+
+### 4.6 인터페이스 배선
 
 - `FtqToCtrlIO`는 Frontend→XSCore→Backend로 기존 `<>` 연결 경유 (pairWen 추가 때와 동일 경로) —
   번들 필드 추가 외 배선 작업 없음.
