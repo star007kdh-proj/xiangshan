@@ -24,6 +24,7 @@ import utility.XSPerfHistogram
 import utils.VecRotate
 import xiangshan.frontend.bpu.BasePredictor
 import xiangshan.frontend.bpu.BasePredictorIO
+import xiangshan.frontend.bpu.PdInvalidateReq
 import xiangshan.frontend.bpu.Prediction
 
 class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParameters with Helpers {
@@ -37,6 +38,9 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
 
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumBtbPredEntries, Bool()))
+
+    // predecode-triggered ghost entry invalidation
+    val pdInvalidate: Valid[PdInvalidateReq] = Flipped(Valid(new PdInvalidateReq))
   }
 
   val io: MainBtbIO = IO(new MainBtbIO)
@@ -380,6 +384,42 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     XSPerfAccumulate("vc_train_both_miss", t1_doInsertVc)
     XSPerfAccumulate("vc_train_insert", t1_doInsertVc && t1_evictedMeta.sramValid.get)
   }
+
+  /* *** predecode-triggered SRAM + VC invalidation *** */
+  private val pdInval_r0_fire = io.pdInvalidate.valid
+  private val pdInval_r1_fire = RegNext(pdInval_r0_fire, false.B)
+  private val pdInval_r1_req  = RegEnable(io.pdInvalidate.bits, pdInval_r0_fire)
+
+  private val pdInval_r1_cfiPc           = pdInval_r1_req.cfiPc
+  private val pdInval_r1_alignBankIdx    = getAlignBankIndex(pdInval_r1_cfiPc)
+  private val pdInval_r1_setIdx          = getSetIndex(pdInval_r1_cfiPc)
+  private val pdInval_r1_internalBankIdx = getInternalBankIndex(pdInval_r1_cfiPc)
+  private val pdInval_r1_fullPosition    = Cat(
+    getAlignBankIndex(pdInval_r1_cfiPc),
+    getAlignedInstOffset(pdInval_r1_cfiPc)
+  )
+  private val pdInval_r1_activeMeta = pdInval_r1_req.mbtbMeta.entries(pdInval_r1_alignBankIdx)
+  private val pdInval_r1_wayMask = VecInit(
+    pdInval_r1_activeMeta.map(m => m.rawHit && m.position === pdInval_r1_fullPosition)
+  ).asUInt
+  private val pdInval_r1_alignBankMask = UIntToOH(pdInval_r1_alignBankIdx, NumAlignBanks)
+
+  // SRAM flush dispatch
+  alignBanks.zipWithIndex.foreach { case (b, i) =>
+    b.io.pdFlush.valid                  := pdInval_r1_fire && pdInval_r1_wayMask.orR && pdInval_r1_alignBankMask(i)
+    b.io.pdFlush.bits.setIdx            := pdInval_r1_setIdx
+    b.io.pdFlush.bits.internalBankIdx   := pdInval_r1_internalBankIdx
+    b.io.pdFlush.bits.wayMask           := pdInval_r1_wayMask
+  }
+
+  // VC CAM invalidation (always fire — no-op if no match)
+  vc.foreach { vcModule =>
+    vcModule.io.pdInvalidate.valid         := pdInval_r1_fire
+    vcModule.io.pdInvalidate.bits.vcTag    := makeVCTag(pdInval_r1_cfiPc)
+    vcModule.io.pdInvalidate.bits.position := getAlignedInstOffset(pdInval_r1_cfiPc)
+  }
+
+  XSPerfAccumulate("pd_invalidate", pdInval_r1_fire && pdInval_r1_wayMask.orR)
 
   /* --------------------------------------------------------------------------------------------------------------
      MainBTB Trace

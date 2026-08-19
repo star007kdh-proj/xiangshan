@@ -407,6 +407,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   // used for mainBTB replacer
   mbtb.io.s3_takenMask := s3_takenMask
 
+  // predecode-triggered ghost entry invalidation
+  mbtb.io.pdInvalidate := io.fromFtq.pdInvalidate
+
   // used for ghr
   private val s3_condHitMask = VecInit(s3_mbtbResult.map(e => e.valid && e.bits.attribute.isConditional))
 

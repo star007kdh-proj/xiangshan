@@ -126,6 +126,12 @@ class MainBtbMeta(implicit p: Parameters) extends MainBtbBundle {
     vcSlotMetas.map(vc => entries.flatten ++ vc).getOrElse(entries.flatten)
 }
 
+class PdFlushReq(implicit p: Parameters) extends MainBtbBundle {
+  val setIdx:          UInt = UInt(SetIdxLen.W)
+  val internalBankIdx: UInt = UInt(InternalBankIdxLen.W)
+  val wayMask:         UInt = UInt(NumWay.W)
+}
+
 class MainBtbAlignBankTrace(implicit p: Parameters) extends MainBtbBundle {
   val needWrite: Bool         = Bool()
   val setIdx:    UInt         = UInt(SetIdxLen.W)

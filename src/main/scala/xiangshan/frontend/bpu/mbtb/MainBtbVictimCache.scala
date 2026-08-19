@@ -74,6 +74,9 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
 
     // S3 PLRU prediction touches (one per VC result slot)
     val predTouch: Vec[Valid[UInt]] = Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W))))
+
+    // Predecode-triggered VC entry invalidation (ghost entry removal)
+    val pdInvalidate: Valid[InvalidateReq] = Flipped(Valid(new InvalidateReq))
   }
 
   val io: MainBtbVictimCacheIO = IO(new MainBtbVictimCacheIO)
@@ -166,6 +169,14 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
   when(io.insert.valid) {
     entries(insertIdx) := io.insert.bits.entry
   }
+  when(io.pdInvalidate.valid) {
+    entries.foreach { e =>
+      when(e.valid && e.vcTag === io.pdInvalidate.bits.vcTag &&
+        e.position === io.pdInvalidate.bits.position) {
+        e.valid := false.B
+      }
+    }
+  }
 
   /* *** performance counters *** */
   private val perf_anyLookupHit = io.lookup.map(_.resp.hit1).reduce(_ || _)
@@ -178,4 +189,5 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
   XSPerfAccumulate("vc_replace_invalid", io.insert.valid && !replacer.io.validBits.andR)
   XSPerfAccumulate("vc_replace_plru", io.insert.valid && replacer.io.validBits.andR)
   XSPerfAccumulate("vc_insert_duplicate", io.insert.valid && hasDuplicate)
+  XSPerfAccumulate("vc_pd_invalidate", io.pdInvalidate.valid)
 }

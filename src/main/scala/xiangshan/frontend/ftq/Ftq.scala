@@ -458,6 +458,18 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.redirect.bits.meta      := RegNext(metaQueueRedirect(redirectFtqIdxInAdvance.value))
   io.toBpu.redirectFromIFU         := ifuRedirect.valid
 
+  // predecode-triggered BTB entry invalidation (NotCfiTaken / InvalidTaken, attribute = None)
+  // meta is pre-read with the in-advance ftqIdx to avoid a FtqSize-wide mux on the redirect cycle
+  io.toBpu.pdInvalidate.valid      := ifuRedirect.valid && ifuRedirect.bits.attribute.isNone
+  io.toBpu.pdInvalidate.bits.cfiPc := getCfiPcFromOffset(
+    PrunedAddrInit(ifuRedirect.bits.pc),
+    ifuRedirect.bits.ftqOffset
+  )
+  io.toBpu.pdInvalidate.bits.mbtbMeta := RegEnable(
+    metaQueueResolve(ifuRedirectFtqIdxInAdvance.bits.value).mbtb,
+    ifuRedirectFtqIdxInAdvance.valid
+  )
+
   // pair-second mispred markers: use the slot's own flag, cleared on every re-enqueue
   // (isPairFirst of the prior slot survives a redirect targeting that slot and goes stale).
   io.toBpu.redirect.bits.isPairSecond.foreach { p =>

@@ -293,6 +293,11 @@ class BpuCommit(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
   val attribute: BranchAttribute = new BranchAttribute
 }
 
+class PdInvalidateReq(implicit p: Parameters) extends BpuBundle {
+  val cfiPc:    PrunedAddr  = PrunedAddr(VAddrBits)
+  val mbtbMeta: MainBtbMeta = new MainBtbMeta
+}
+
 // metadata for redirect (e.g. speculative state recovery) & training (e.g. rasPtr, phr)
 class BpuRedirectMeta(implicit p: Parameters) extends BpuBundle {
   val phr:          PhrMeta         = new PhrMeta

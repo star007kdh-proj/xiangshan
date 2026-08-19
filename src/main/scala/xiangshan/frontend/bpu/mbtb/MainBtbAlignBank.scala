@@ -81,6 +81,9 @@ class MainBtbAlignBank(
     val s1_rawValidBits:       Option[Vec[Bool]] = Option.when(HasVC)(Output(Vec(NumWay, Bool())))
     val vcSuppressWrite:       Option[Bool]      = Option.when(HasVC)(Input(Bool()))
     val replacerVictimWayMask: Option[UInt]      = Option.when(HasVC)(Output(UInt(NumWay.W)))
+
+    // predecode flush
+    val pdFlush: Valid[PdFlushReq] = Flipped(Valid(new PdFlushReq))
   }
 
   val io: MainBtbAlignBankIO = IO(new MainBtbAlignBankIO)
@@ -291,13 +294,19 @@ class MainBtbAlignBank(
     b.io.writeCounter.req.bits.counters := t1_newCounters
   }
 
-  /* *** multi-hit detection & flush *** */
-  private val s2_multiHitMask = detectMultiHit(s2_hitMask, VecInit(s2_rawEntries.map(_.position)))
+  /* *** multi-hit detection & predecode flush *** */
+  private val s2_multiHitMask  = detectMultiHit(s2_hitMask, VecInit(s2_rawEntries.map(_.position)))
+  private val s2_multiHitFlush = s2_fire && s2_multiHitMask.orR
+
+  private val pdFlushBankMask = UIntToOH(io.pdFlush.bits.internalBankIdx, NumInternalBanks)
 
   internalBanks.zipWithIndex.foreach { case (b, i) =>
-    b.io.flush.req.valid        := s2_fire && s2_multiHitMask.orR && s2_internalBankMask(i)
-    b.io.flush.req.bits.setIdx  := s2_setIdx
-    b.io.flush.req.bits.wayMask := s2_multiHitMask
+    val multiHitValid = s2_multiHitFlush && s2_internalBankMask(i)
+    val pdFlushValid  = io.pdFlush.valid && pdFlushBankMask(i)
+
+    b.io.flush.req.valid        := multiHitValid || pdFlushValid
+    b.io.flush.req.bits.setIdx  := Mux(pdFlushValid, io.pdFlush.bits.setIdx, s2_setIdx)
+    b.io.flush.req.bits.wayMask := Mux(pdFlushValid, io.pdFlush.bits.wayMask, s2_multiHitMask)
   }
 
   // mainBTB trace bundle
