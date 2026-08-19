@@ -370,6 +370,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   /* *** s3 prediction selection *** */
   private val s3_mbtbResult     = RegEnable(mbtb.io.result, s2_fire)
+
+  fastTrain.bits.mbtbHitMask    := VecInit(s3_mbtbResult.map(_.valid))
+  fastTrain.bits.mbtbPositions  := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
+  fastTrain.bits.mbtbAttributes := VecInit(s3_mbtbResult.map(_.bits.attribute))
   private val s3_tagePrediction = RegEnable(tage.io.prediction, s2_fire)
   private val s3_scUsed      = RegEnable(sc.io.scUsed, s2_fire)
   private val s3_scTakenMask = RegEnable(sc.io.scTakenMask, s2_fire)

@@ -223,7 +223,8 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
 
   private val t0_train = io.fastTrain.get.bits
 
-  private val t0_fire = io.enable && io.fastTrain.get.valid && t0_train.finalPrediction.taken && t0_train.abtbMeta.valid
+  // also fires on not-taken finals so entries the mainBTB no longer backs can be invalidated
+  private val t0_fire = io.enable && io.fastTrain.get.valid && t0_train.abtbMeta.valid
 
   /* --------------------------------------------------------------------------------------------------------------
      train pipeline stage 1
@@ -276,16 +277,28 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     e.hit && e.position === t1_trainPosition && e.attribute === t1_trainAttribute
   }
   private val t1_hit               = t1_hitMask.reduce(_ || _)
-  private val t1_needWriteNewEntry = !t1_hit
+  private val t1_needWriteNewEntry = !t1_hit && t1_trainTaken
 
   // If the target of indirect branch is wrong, we need correct it.
   // Since the entry only stores the lower bits of the target, we only need to check the lower bits.
   private val t1_hitMaskOH         = PriorityEncoderOH(t1_hitMask)
   private val t1_predictInfo       = Mux1H(t1_hitMaskOH, t1_meta.entries)
   private val t1_targetDiff        = t1_predictInfo.targetLowerBits =/= t1_trainTargetLowerBits
-  private val t1_needCorrectTarget = t1_hit && t1_trainAttribute.isIndirect && t1_targetDiff
+  private val t1_needCorrectTarget = t1_hit && t1_trainTaken && t1_trainAttribute.isIndirect && t1_targetDiff
 
   // TODO: if the attribute of the taken branch is wrong, we need replace it or invalidate it
+
+  // a hit way with no matching mainBTB entry is unbacked: it only causes s3 overrides, so invalidate it
+  private val t1_mbtbBackedMask = t1_meta.entries.map { e =>
+    t1_train.mbtbHitMask.zip(t1_train.mbtbPositions).zip(t1_train.mbtbAttributes).map {
+      case ((mbtbHit, mbtbPos), mbtbAttr) => mbtbHit && mbtbPos === e.position && mbtbAttr === e.attribute
+    }.reduce(_ || _)
+  }
+  private val t1_unbackedMask = t1_meta.entries.zip(t1_mbtbBackedMask).map {
+    case (e, backed) => e.hit && !backed
+  }
+  private val t1_needInvalidateUnbacked = t1_unbackedMask.reduce(_ || _)
+  private val t1_unbackedWayIdx         = PriorityEncoder(t1_unbackedMask)
 
   private val t1_writeEntry = Wire(new AheadBtbEntry)
   t1_writeEntry.valid           := true.B
@@ -317,6 +330,12 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
       b.io.writeReq.bits.setIdx       := s2_setIdx
       b.io.writeReq.bits.wayIdx       := s2_multiHitWayIdx
       b.io.writeReq.bits.entry        := 0.U.asTypeOf(new AheadBtbEntry)
+    }.elsewhen(t1_fire && t1_needInvalidateUnbacked && t1_bankMask(i)) {
+      b.io.writeReq.valid             := true.B
+      b.io.writeReq.bits.needResetCtr := true.B
+      b.io.writeReq.bits.setIdx       := t1_setIdx
+      b.io.writeReq.bits.wayIdx       := t1_unbackedWayIdx
+      b.io.writeReq.bits.entry        := 0.U.asTypeOf(new AheadBtbEntry)
     }.otherwise {
       b.io.writeReq.valid := false.B
       b.io.writeReq.bits  := 0.U.asTypeOf(new BankWriteReq)
@@ -344,6 +363,7 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   XSPerfAccumulate("train_num", t1_fire)
   XSPerfAccumulate("train_actual_taken", t1_fire && t1_trainTaken)
   XSPerfAccumulate("train_actual_not_taken", t1_fire && !t1_trainTaken)
+  XSPerfAccumulate("train_invalidate_unbacked", t1_fire && t1_needInvalidateUnbacked)
 
   XSPerfAccumulate("total_write", t1_fire && (t1_needWriteNewEntry || t1_needCorrectTarget) || s2_valid && s2_multiHit)
   XSPerfAccumulate("train_write_new_entry", t1_fire && t1_needWriteNewEntry)

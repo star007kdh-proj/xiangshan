@@ -281,6 +281,11 @@ class BpuFastTrain(implicit p: Parameters) extends BpuBundle {
   val hasOverride:     Bool          = Bool()
   val abtbMeta:        AheadBtbMeta  = new AheadBtbMeta
   val utageMeta:       MicroTageMeta = new MicroTageMeta
+
+  // s3 mainBTB result summary, used by AheadBtb to invalidate entries the mainBTB no longer backs
+  val mbtbHitMask:    Vec[Bool]            = Vec(NumBtbPredEntries, Bool())
+  val mbtbPositions:  Vec[UInt]            = Vec(NumBtbPredEntries, UInt(CfiPositionWidth.W))
+  val mbtbAttributes: Vec[BranchAttribute] = Vec(NumBtbPredEntries, new BranchAttribute)
 }
 
 // metadata for commit training (e.g. ras)
