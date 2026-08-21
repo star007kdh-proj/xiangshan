@@ -182,12 +182,11 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   }
 
   private val fastTrain = Wire(Valid(new BpuFastTrain))
-  fastTrain.valid                := s3_valid
-  fastTrain.bits.startPc         := s3_startPc
-  fastTrain.bits.finalPrediction := s3_prediction
-  fastTrain.bits.abtbMeta        := s3_abtbMeta
-  fastTrain.bits.utageMeta       := s3_utageMeta
-  fastTrain.bits.hasOverride     := s3_override
+  fastTrain.valid        := s3_valid
+  fastTrain.bits.startPc := s3_startPc
+  fastTrain.bits.branch.fromPrediction(s3_prediction, s3_override)
+  fastTrain.bits.abtbMeta  := s3_abtbMeta
+  fastTrain.bits.utageMeta := s3_utageMeta
 
   predictors.foreach { p =>
     // TODO: duplicate pc and fire to solve high fan-out issue
@@ -786,7 +785,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       s1_usePair && s3_override && io.toFtq.prediction.fire)
     XSPerfAccumulate("s1PredSuppressedByPair", s1_lastPairFire && s1_abtbValid)
     XSPerfAccumulate("abtbTrainDroppedPairSkipMeta",
-      fastTrain.valid && fastTrain.bits.finalPrediction.taken && s3_abtbMetaSkip && s3_abtbMeta.valid)
+      fastTrain.valid && fastTrain.bits.branch.taken && s3_abtbMetaSkip && s3_abtbMeta.valid)
     XSPerfAccumulate("commonHRPairSecondShift", s3_fire && s3_usePair && !s3_override)
     XSPerfAccumulate("pairFireToFtq",
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))

@@ -53,7 +53,6 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   println(f"MicroBtb:")
   println(f"  Size(full-assoc): $NumEntries")
-  println(f"  Use fast-train: $UseFastTrain")
   println(f"  Replacer: $Replacer")
   println(f"  EnableTwoTaken (pair): $EnableTwoTaken")
   println(f"  Address fields:")
@@ -158,29 +157,18 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
    * - check if hits t1 stage
    * - calculate hit flags
    */
-  private val t0_fire        = Wire(Bool())
-  private val t0_startPc     = Wire(PrunedAddr(VAddrBits))
-  private val t0_actualTaken = Wire(Bool())
-  private val t0_position    = Wire(UInt(CfiPositionWidth.W))
-  private val t0_fullTarget  = Wire(PrunedAddr(VAddrBits))
-  private val t0_attribute   = Wire(new BranchAttribute)
+  private val t0_useFast    = io.fastTrain.get.valid
+  private val t0_useResolve = io.stageCtrl.t0_fire && io.train.mispredictBranch.valid
 
-  if (UseFastTrain) {
-    t0_fire        := io.fastTrain.get.valid && io.enable
-    t0_startPc     := io.fastTrain.get.bits.startPc
-    t0_actualTaken := io.fastTrain.get.bits.finalPrediction.taken
-    t0_position    := io.fastTrain.get.bits.finalPrediction.cfiPosition
-    t0_fullTarget  := io.fastTrain.get.bits.finalPrediction.target
-    t0_attribute   := io.fastTrain.get.bits.finalPrediction.attribute
-  } else {
-    // FIXME: not sure if first mispredict is the best, maybe first taken?
-    t0_fire        := io.stageCtrl.t0_fire && io.train.mispredictBranch.valid && io.enable
-    t0_startPc     := io.train.startPc
-    t0_actualTaken := io.train.mispredictBranch.bits.taken
-    t0_position    := io.train.mispredictBranch.bits.cfiPosition
-    t0_fullTarget  := io.train.mispredictBranch.bits.target
-    t0_attribute   := io.train.mispredictBranch.bits.attribute
-  }
+  // resolve's mispredict has higher priority; pair learning below keeps reading fastTrain directly
+  private val t0_fire    = (t0_useFast || t0_useResolve) && io.enable
+  private val t0_startPc = Mux(t0_useResolve, io.train.startPc, io.fastTrain.get.bits.startPc)
+  private val t0_branch  = Mux(t0_useResolve, io.train.mispredictBranch.bits, io.fastTrain.get.bits.branch)
+
+  private val t0_actualTaken = t0_branch.taken
+  private val t0_position    = t0_branch.cfiPosition
+  private val t0_fullTarget  = t0_branch.target
+  private val t0_attribute   = t0_branch.attribute
 
   private val t0_tag         = getTag(t0_startPc)
   private val t0_target      = getEntryTarget(t0_fullTarget)
@@ -293,10 +281,11 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   // pair learning: chain two consecutive fastTrain cycles (prev=A, cur=B) and
   // update prev's entry. snapshot cleared on redirect so no pair chains across a squash.
+  // resolve-sourced trains never feed the chain: they are sparse and out of stream order.
   private val pairPrev_valid = if (EnableTwoTaken) RegInit(false.B) else WireDefault(false.B)
-  private val pairPrev_ft    = if (UseFastTrain && EnableTwoTaken)
+  private val pairPrev_ft    = if (EnableTwoTaken)
     Reg(chiselTypeOf(io.fastTrain.get.bits)) else WireDefault(0.U.asTypeOf(new BpuFastTrain))
-  if (UseFastTrain && EnableTwoTaken) {
+  if (EnableTwoTaken) {
     val ftFire = io.fastTrain.get.valid && io.enable
     when(io.redirectValid.get) {
       // drop the pre-redirect prev; do not latch this cycle's ft (flush in flight)
@@ -311,9 +300,9 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   // sequential adjacency: prev taken into cur's start (self-loop excluded).
   private val t0_pairSeq =
-    if (UseFastTrain && EnableTwoTaken) {
+    if (EnableTwoTaken) {
       val cur       = io.fastTrain.get
-      val prev_pred = pairPrev_ft.finalPrediction
+      val prev_pred = pairPrev_ft.branch
       pairPrev_valid && cur.valid && io.enable &&
         prev_pred.taken &&
         (cur.bits.startPc.toUInt === prev_pred.target.toUInt) &&
@@ -323,7 +312,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   // slot A type gate: cond / direct-jmp / direct-call; reject return + indirect.
   private val t0_slotAOk =
     if (EnableTwoTaken) {
-      val a = pairPrev_ft.finalPrediction.attribute
+      val a = pairPrev_ft.branch.attribute
       !a.hasPop && !a.isIndirect
     } else false.B
 
@@ -338,7 +327,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   private val t0_entryConsistent =
     if (EnableTwoTaken) {
       val e         = entries(t0_promoteHitIdx)
-      val prev_pred = pairPrev_ft.finalPrediction
+      val prev_pred = pairPrev_ft.branch
       (e.slot1.position === prev_pred.cfiPosition) &&
       (e.slot1.target === getEntryTarget(prev_pred.target))
     } else false.B
@@ -347,15 +336,15 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   private val t0_pairBase = t0_pairSeq && t0_slotAOk && t0_promoteEntryHit && t0_entryConsistent
   // fastTrainKill: B not-taken, return, call, or indirect -> invalidate slot2
   private val t0_fastTrainKill =
-    if (UseFastTrain && EnableTwoTaken) {
-      val cur_pred = io.fastTrain.get.bits.finalPrediction
+    if (EnableTwoTaken) {
+      val cur_pred = io.fastTrain.get.bits.branch
       val cur_attr = cur_pred.attribute
       t0_pairBase && (!cur_pred.taken || cur_attr.hasPop || cur_attr.hasPush || cur_attr.isIndirect)
     } else false.B
   // eligible: B is direct-jmp or always-taken-proxy conditional -> alloc/confirm/kill
   private val t0_pairEligible =
-    if (UseFastTrain && EnableTwoTaken) {
-      val cur_pred = io.fastTrain.get.bits.finalPrediction
+    if (EnableTwoTaken) {
+      val cur_pred = io.fastTrain.get.bits.branch
       val cur_attr = cur_pred.attribute
       t0_pairBase && cur_pred.taken && !cur_attr.hasPop && !cur_attr.hasPush && !cur_attr.isIndirect &&
         (cur_attr.isDirect || cur_attr.isConditional)
@@ -365,18 +354,18 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   private val t1_promote     = RegNext(t0_pairEligible, init = false.B)
   private val t1_promoteIdx  = RegEnable(t0_promoteHitIdx, t0_pairEligible)
   private val t1_promoteSlot2Pos   =
-    if (UseFastTrain && EnableTwoTaken)
-      RegEnable(io.fastTrain.get.bits.finalPrediction.cfiPosition, t0_pairEligible) else 0.U
+    if (EnableTwoTaken)
+      RegEnable(io.fastTrain.get.bits.branch.cfiPosition, t0_pairEligible) else 0.U
   private val t1_promoteSlot2Attr  =
-    if (UseFastTrain && EnableTwoTaken)
-      RegEnable(io.fastTrain.get.bits.finalPrediction.attribute, t0_pairEligible)
+    if (EnableTwoTaken)
+      RegEnable(io.fastTrain.get.bits.branch.attribute, t0_pairEligible)
     else 0.U.asTypeOf(new BranchAttribute)
   private val t1_promoteSlot2Tgt   =
-    if (UseFastTrain && EnableTwoTaken)
-      RegEnable(getEntryTarget(io.fastTrain.get.bits.finalPrediction.target), t0_pairEligible) else 0.U
+    if (EnableTwoTaken)
+      RegEnable(getEntryTarget(io.fastTrain.get.bits.branch.target), t0_pairEligible) else 0.U
   private val t1_promoteSlot2Carry =
-    if (UseFastTrain && EnableTwoTaken && EnableTargetFix)
-      Some(RegEnable(getTargetCarry(io.fastTrain.get.bits.startPc, io.fastTrain.get.bits.finalPrediction.target),
+    if (EnableTwoTaken && EnableTargetFix)
+      Some(RegEnable(getTargetCarry(io.fastTrain.get.bits.startPc, io.fastTrain.get.bits.branch.target),
         t0_pairEligible)) else None
 
   // latch kill data into t1
@@ -493,6 +482,8 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   XSPerfAccumulate("s1InvalidatedEntries", t1_fire && t1_hit && !t1_actualTaken && t1_hitNotUseful)
 
+  XSPerfAccumulate("trainFromResolve", t0_fire && t0_useResolve)
+  XSPerfAccumulate("trainFastDroppedByResolve", t0_fire && t0_useResolve && t0_useFast)
   XSPerfAccumulate("trainHitEntries", t0_fire && t0_realHit)
   XSPerfAccumulate("trainHitT1Update", t0_fire && t0_hitT1Update)
   XSPerfAccumulate("trainHitT1Victim", t0_fire && t0_hitT1Victim)
@@ -523,22 +514,22 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     )
 
     // chain detection + classification (fastTrain dependent)
-    if (UseFastTrain) {
-      val cur_attr = io.fastTrain.get.bits.finalPrediction.attribute
-      val cur_taken = io.fastTrain.get.bits.finalPrediction.taken
+    locally {
+      val cur_attr = io.fastTrain.get.bits.branch.attribute
+      val cur_taken = io.fastTrain.get.bits.branch.taken
       XSPerfAccumulate("pairChainFound", t0_pairSeq)
       // chains recovered by holding prev across a fastTrain bubble
       XSPerfAccumulate("pairChainAcrossBubble",
         t0_pairSeq && !RegNext(io.fastTrain.get.valid && io.enable, false.B))
       XSPerfAccumulate("pairChainBroken",
         pairPrev_valid && io.fastTrain.get.valid && io.enable &&
-          pairPrev_ft.finalPrediction.taken && !t0_pairSeq)
+          pairPrev_ft.branch.taken && !t0_pairSeq)
       XSPerfAccumulate("pairSkipEntryMismatch",
         t0_pairSeq && t0_slotAOk && t0_promoteEntryHit && !t0_entryConsistent)
-      XSPerfAccumulate("pairSkipFirstRet", t0_pairSeq && pairPrev_ft.finalPrediction.attribute.hasPop)
+      XSPerfAccumulate("pairSkipFirstRet", t0_pairSeq && pairPrev_ft.branch.attribute.hasPop)
       XSPerfAccumulate("pairSkipFirstIndirect",
-        t0_pairSeq && !pairPrev_ft.finalPrediction.attribute.hasPop &&
-          pairPrev_ft.finalPrediction.attribute.isIndirect)
+        t0_pairSeq && !pairPrev_ft.branch.attribute.hasPop &&
+          pairPrev_ft.branch.attribute.isIndirect)
       XSPerfAccumulate("pairFastTrainKill", t0_fastTrainKill)
       XSPerfAccumulate("pairFastTrainKillNoTaken", t0_fastTrainKill && !cur_taken)
       XSPerfAccumulate("pairFastTrainKillRet", t0_fastTrainKill && cur_taken && cur_attr.hasPop)

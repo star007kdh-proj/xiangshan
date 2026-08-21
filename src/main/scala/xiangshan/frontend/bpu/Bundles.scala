@@ -243,6 +243,7 @@ class BranchInfo(implicit p: Parameters) extends BpuBundle with HalfAlignHelper 
 
   val debug_realCfiPc: Option[UInt] = Option.when(!env.FPGAPlatform)(UInt(VAddrBits.W))
 
+  // backend resolve train s1/s3 predictor
   def fromResolve(resolve: Resolve): Unit = {
     this.taken       := resolve.taken
     this.target      := resolve.target
@@ -257,6 +258,17 @@ class BranchInfo(implicit p: Parameters) extends BpuBundle with HalfAlignHelper 
         resolve.debug_isRVC.get
       )
     }
+  }
+
+  // s3 prediction train s1 predictor
+  def fromPrediction(prediction: Prediction, hasOverride: Bool): Unit = {
+    this.taken       := prediction.taken
+    this.target      := prediction.target
+    this.cfiPosition := prediction.cfiPosition
+    this.attribute   := prediction.attribute
+    this.mispredict  := hasOverride
+    // not available
+    this.debug_realCfiPc.foreach(_ := DontCare)
   }
 }
 
@@ -276,11 +288,10 @@ class BpuTrain(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
 
 // use s3 prediction to train s1 predictors
 class BpuFastTrain(implicit p: Parameters) extends BpuBundle {
-  val startPc:         PrunedAddr    = PrunedAddr(VAddrBits)
-  val finalPrediction: Prediction    = new Prediction
-  val hasOverride:     Bool          = Bool()
-  val abtbMeta:        AheadBtbMeta  = new AheadBtbMeta
-  val utageMeta:       MicroTageMeta = new MicroTageMeta
+  val startPc:   PrunedAddr    = PrunedAddr(VAddrBits)
+  val branch:    BranchInfo    = new BranchInfo
+  val abtbMeta:  AheadBtbMeta  = new AheadBtbMeta
+  val utageMeta: MicroTageMeta = new MicroTageMeta
 }
 
 // metadata for commit training (e.g. ras)

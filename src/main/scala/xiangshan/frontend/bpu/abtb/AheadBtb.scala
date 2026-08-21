@@ -245,7 +245,7 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
 
   private val t0_train = io.fastTrain.get.bits
 
-  private val t0_fire = io.enable && io.fastTrain.get.valid && t0_train.finalPrediction.taken && t0_train.abtbMeta.valid
+  private val t0_fire = io.enable && io.fastTrain.get.valid && t0_train.branch.taken && t0_train.abtbMeta.valid
 
   /* --------------------------------------------------------------------------------------------------------------
      train pipeline stage 1
@@ -263,10 +263,10 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   private val t1_bankMask = t1_meta.bankMask
 
   // use taken branch of s3 prediction to train abtb
-  private val t1_trainTaken           = t1_train.finalPrediction.taken
-  private val t1_trainPosition        = t1_train.finalPrediction.cfiPosition
-  private val t1_trainAttribute       = t1_train.finalPrediction.attribute
-  private val t1_trainTarget          = t1_train.finalPrediction.target
+  private val t1_trainTaken           = t1_train.branch.taken
+  private val t1_trainPosition        = t1_train.branch.cfiPosition
+  private val t1_trainAttribute       = t1_train.branch.attribute
+  private val t1_trainTarget          = t1_train.branch.target
   private val t1_trainTargetLowerBits = getTargetLowerBits(t1_trainTarget)
 
   private val t1_condMask           = t1_meta.entries.map(e => e.hit && e.attribute.isConditional)
