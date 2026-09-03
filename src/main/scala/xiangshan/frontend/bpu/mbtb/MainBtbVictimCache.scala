@@ -19,6 +19,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.XSPerfAccumulate
+import xiangshan.frontend.bpu.SaturateCounter
 
 // One fully-associative victim cache per (alignBank, internalBank); all lookups are done by MainBtbAlignBank
 class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule {
@@ -41,6 +42,9 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule {
       val entry: VCEntry = new VCEntry
     }
     val update: Valid[UpdateReq] = Flipped(Valid(new UpdateReq))
+
+    // T1 counter training for every resolved conditional branch matching an entry
+    val counterUpdate: Vec[Valid[SaturateCounter]] = Vec(VCSize, Flipped(Valid(TakenCounter())))
 
     // invalidation mask, OR of: T1 SRAM-hit duplicate, S2 duplicate, predecode ghost entry
     val invalidateMask: UInt = Input(UInt(VCSize.W))
@@ -72,7 +76,12 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule {
   replacer.io.trainTouch.valid := io.insert.valid || io.update.valid
   replacer.io.trainTouch.bits  := Mux(io.insert.valid, insertIdx, io.update.bits.idx)
 
-  /* *** sequential writes, later blocks win: invalidate < update < insert *** */
+  /* *** sequential writes, later blocks win: counter < invalidate < update < insert *** */
+  io.counterUpdate.zipWithIndex.foreach { case (c, i) =>
+    when(c.valid) {
+      entries(i).counter := c.bits
+    }
+  }
   entries.zipWithIndex.foreach { case (e, i) =>
     when(io.invalidateMask(i)) {
       e.valid := false.B
@@ -91,5 +100,6 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule {
   XSPerfAccumulate("vc_replace_invalid", io.insert.valid && !hasDuplicate && !replacer.io.validBits.andR)
   XSPerfAccumulate("vc_replace_plru", io.insert.valid && !hasDuplicate && replacer.io.validBits.andR)
   XSPerfAccumulate("vc_update", io.update.valid)
+  XSPerfAccumulate("vc_counter_update", PopCount(io.counterUpdate.map(_.valid)))
   XSPerfAccumulate("vc_invalidate", PopCount(io.invalidateMask))
 }

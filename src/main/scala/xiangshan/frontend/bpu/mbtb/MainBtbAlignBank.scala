@@ -309,7 +309,7 @@ class MainBtbAlignBank(
     b.io.writeCounter.req.bits.counters := t1_newCounters
   }
 
-  /* *** victim cache: T1 CAM, three-path training, invalidation routing *** */
+  /* *** victim cache: T1 CAM, three-path training, counter training, invalidation routing *** */
   vcs.foreach { vcs =>
     val t1_vcEntries   = Mux1H(t1_internalBankMask, vcs.map(_.io.entries))
     val t1_vcTag       = makeVCTag(t1_startPc)
@@ -362,6 +362,17 @@ class MainBtbAlignBank(
     t1_evictedEntry.counter         := t1_evictedMeta.counter
     val t1_vcInsertValid = t1_doInsertVc && t1_entryNeedWrite && t1_evictedMeta.sramValid.get
 
+    // Counter training: every resolved conditional branch matching a VC entry, in all align banks
+    val t1_vcCounterUpdate = Wire(Vec(VCSize, Valid(TakenCounter())))
+    (t1_vcEntries zip t1_vcTagMatch zip t1_vcPositions).zipWithIndex.foreach { case (((e, tagMatch), pos), k) =>
+      val hitMask = t1_branches.map { branch =>
+        branch.valid && branch.bits.attribute.isConditional && tagMatch && pos === branch.bits.cfiPosition
+      }
+      val actualTaken = Mux1H(hitMask, t1_branches.map(_.bits.taken))
+      t1_vcCounterUpdate(k).valid := t1_fire && hitMask.reduce(_ || _)
+      t1_vcCounterUpdate(k).bits  := e.counter.getUpdate(actualTaken)
+    }
+
     // Predecode ghost entry: CAM the addressed internal bank's entries
     val pd         = io.pdVcInvalidate.get
     val pdBankMask = UIntToOH(pd.bits.internalBankIdx, NumInternalBanks)
@@ -382,6 +393,11 @@ class MainBtbAlignBank(
 
       vc.io.insert.valid      := t1_vcInsertValid && t1_internalBankMask(i)
       vc.io.insert.bits.entry := t1_evictedEntry
+
+      (vc.io.counterUpdate zip t1_vcCounterUpdate).foreach { case (port, upd) =>
+        port.valid := upd.valid && t1_internalBankMask(i)
+        port.bits  := upd.bits
+      }
 
       (vc.io.predTouch zip io.s3_vcPredTouch.get).foreach { case (port, touch) =>
         port.valid := touch.valid && s3_internalBankMask(i)
