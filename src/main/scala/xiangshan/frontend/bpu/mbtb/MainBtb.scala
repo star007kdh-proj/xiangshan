@@ -50,11 +50,13 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   println(f"  Size(set, way, align, internal): $NumSets * $NumWay * $NumAlignBanks * $NumInternalBanks = $NumEntries")
   println(f"  Address fields:")
   addrFields.show(indent = 4)
-  if (HasVC) println(f"  VC: $VCSize entries, tag=$VCTagWidth bits, resultSlots=$NumVCResultSlots")
+  if (HasVC) {
+    println(f"  VC: $VCSize entries * ${NumAlignBanks * NumInternalBanks} instances, " +
+      f"tag=$VCTagWidth bits, resultSlots=$NumVCResultSlots")
+  }
 
   /* *** submodules *** */
   private val alignBanks = Seq.tabulate(NumAlignBanks)(alignIdx => Module(new MainBtbAlignBank(alignIdx)))
-  private val vc = if (HasVC) Some(Module(new MainBtbVictimCache)) else None
 
   io.resetDone := alignBanks.map(_.io.resetDone).reduce(_ && _)
 
@@ -94,17 +96,13 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     b.io.read.req.crossPage     := isCrossPage(s0_startPcVec(i), s0_startPc)
   }
 
-  // VC address pipes: S0 → S1 (for VC combinational lookup at S1)
-  private val s1_startPcVec_opt = if (HasVC) Some(RegEnable(s0_startPcVec, s0_fire)) else None
-  private val s1_crossPageVec_opt = if (HasVC) {
-    val s0 = VecInit(s0_startPcVec.map(pc => isCrossPage(pc, s0_startPc)))
-    Some(RegEnable(s0, s0_fire))
-  } else None
-  private val s1_posHigherBitsVec_opt = if (HasVC) Some(RegEnable(s0_posHigherBitsVec, s0_fire)) else None
+  // VC address pipes: S0 -> S1 -> S2, used to compute VC slot targets and positions
+  private val s1_startPcVec_opt       = Option.when(HasVC)(RegEnable(s0_startPcVec, s0_fire))
+  private val s1_posHigherBitsVec_opt = Option.when(HasVC)(RegEnable(s0_posHigherBitsVec, s0_fire))
 
   /* *** s1 ***
    * wait alignBanks
-   * VC combinational lookup + VC slot position assignment for TAGE tag computation
+   * assign VC hits (looked up inside alignBanks) to VC result slots, expose positions for TAGE tag computation
    */
   s1_fire := io.stageCtrl.s1_fire && io.enable
 
@@ -114,34 +112,22 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
       Seq.fill(NumVCResultSlots)(0.U(CfiPositionWidth.W))
   )
 
-  // VC S1 combinational lookup: assign VC hits to dedicated VC result slots with redistribution
-  private val s1_vcSlotInfos_opt: Option[Vec[VCResultSlotInfo]] =
-    if (HasVC) Some(Wire(Vec(NumVCResultSlots, new VCResultSlotInfo))) else None
-  private val s1_vcSlotEntries_opt: Option[Vec[VCEntry]] =
-    if (HasVC) Some(Wire(Vec(NumVCResultSlots, new VCEntry))) else None
+  private val s1_vcSlotInfos_opt   = Option.when(HasVC)(Wire(Vec(NumVCResultSlots, new VCResultSlotInfo)))
+  private val s1_vcSlotEntries_opt = Option.when(HasVC)(Wire(Vec(NumVCResultSlots, new VCEntry)))
 
-  vc.foreach { vcModule =>
-    val startPcVec       = s1_startPcVec_opt.get
-    val crossPageVec     = s1_crossPageVec_opt.get
+  if (HasVC) {
     val posHigherBitsVec = s1_posHigherBitsVec_opt.get
     val slotInfos        = s1_vcSlotInfos_opt.get
     val slotEntries      = s1_vcSlotEntries_opt.get
 
-    // Drive VC lookup for each AlignBank
-    for (i <- 0 until NumAlignBanks) {
-      vcModule.io.lookup(i).req.vcTag            := makeVCTag(startPcVec(i))
-      vcModule.io.lookup(i).req.alignedInstOffset := getAlignedInstOffset(startPcVec(i))
-      vcModule.io.lookup(i).req.crossPage        := crossPageVec(i)
-    }
-
     require(NumAlignBanks == 2, "Redistribution logic assumes NumAlignBanks == 2")
-    val resp0 = vcModule.io.lookup(0).resp
-    val resp1 = vcModule.io.lookup(1).resp
+    val resp0 = alignBanks(0).io.read.s1_vc.get
+    val resp1 = alignBanks(1).io.read.s1_vc.get
 
     // Per-slot redistribution selectors (mutually exclusive by construction
-    // → independent 2:1 muxes instead of priority chain):
-    //   redistToSlot0: AB0 miss & AB1 has both hits → slot 0 borrows AB1's 2nd hit
-    //   redistToSlot1: AB1 miss & AB0 has both hits → slot 1 borrows AB0's 2nd hit
+    // -> independent 2:1 muxes instead of priority chain):
+    //   redistToSlot0: AB0 miss & AB1 has both hits -> slot 0 borrows AB1's 2nd hit
+    //   redistToSlot1: AB1 miss & AB0 has both hits -> slot 1 borrows AB0's 2nd hit
     val redistToSlot0 = !resp0.hit1 && resp1.hit1 && resp1.hit2
     val redistToSlot1 = !resp1.hit1 && resp0.hit1 && resp0.hit2
 
@@ -168,11 +154,10 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     }
   }
 
-  // Pipe VC slot results: S1 → S2
-  private val s2_vcSlotInfos_opt = s1_vcSlotInfos_opt.map(v => RegEnable(v, s1_fire))
-  private val s2_vcSlotEntries_opt = s1_vcSlotEntries_opt.map(v => RegEnable(v, s1_fire))
-  private val s2_posHigherBitsVec_opt = s1_posHigherBitsVec_opt.map(v => RegEnable(v, s1_fire))
-  private val s2_startPcVec_opt = s1_startPcVec_opt.map(v => RegEnable(v, s1_fire))
+  // Pipe VC slot results: S1 -> S2
+  private val s2_vcSlotInfos_opt      = s1_vcSlotInfos_opt.map(v => RegEnable(v, s1_fire))
+  private val s2_vcSlotEntries_opt    = s1_vcSlotEntries_opt.map(v => RegEnable(v, s1_fire))
+  private val s2_startPcVec_opt       = s1_startPcVec_opt.map(v => RegEnable(v, s1_fire))
 
   /* *** s2 ***
    * receive read response from alignBanks
@@ -184,51 +169,54 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val s2_rawPredictions = VecInit(alignBanks.flatMap(_.io.read.resp.predictions))
   io.meta.entries := VecInit(alignBanks.map(_.io.read.resp.metas))
 
+  // VC slot valid, piped to S3 for replacer touch
+  private val s2_vcSlotValid_opt = Option.when(HasVC)(Wire(Vec(NumVCResultSlots, Bool())))
+
   // Assign io.result: SRAM predictions + dedicated VC slots
   if (HasVC) {
     // SRAM part (0..NumWay*NumAlignBanks-1): pure SRAM, no VC merge
     for (k <- 0 until NumWay * NumAlignBanks) {
       io.result(k) := s2_rawPredictions(k)
     }
-    // VC slots (NumWay*NumAlignBanks..NumBtbResultEntries-1)
-    val vcSlotInfos = s2_vcSlotInfos_opt.get
+    // VC slots (NumWay*NumAlignBanks..NumBtbPredEntries-1)
+    val vcSlotInfos   = s2_vcSlotInfos_opt.get
     val vcSlotEntries = s2_vcSlotEntries_opt.get
-    val startPcVec = s2_startPcVec_opt.get
+    val startPcVec    = s2_startPcVec_opt.get
+    val vcSlotValid   = s2_vcSlotValid_opt.get
     for (s <- 0 until NumVCResultSlots) {
-      val idx = NumWay * NumAlignBanks + s
-      val vcEntry = vcSlotEntries(s)
-      val info = vcSlotInfos(s)
-      io.result(idx).valid := info.hit
-      io.result(idx).bits.cfiPosition := Cat(info.posHigherBits, vcEntry.position)
+      val idx          = NumWay * NumAlignBanks + s
+      val vcEntry      = vcSlotEntries(s)
+      val info         = vcSlotInfos(s)
+      val slotPosition = Cat(info.posHigherBits, vcEntry.position)
+
+      vcSlotValid(s) := info.hit
+
+      io.result(idx).valid            := vcSlotValid(s)
+      io.result(idx).bits.cfiPosition := slotPosition
       io.result(idx).bits.target := getFullTarget(
         Mux1H(UIntToOH(info.sourceAlignBank, NumAlignBanks), startPcVec),
-        vcEntry.targetLowerBits, Some(vcEntry.targetCarry)
+        vcEntry.targetLowerBits,
+        Some(vcEntry.targetCarry)
       )
       io.result(idx).bits.attribute := vcEntry.attribute
-      io.result(idx).bits.taken := vcEntry.counter.isPositive
+      io.result(idx).bits.taken     := vcEntry.counter.isPositive
     }
   } else {
     io.result := s2_rawPredictions
   }
 
   // VC meta output
-  io.meta.vc.foreach { vcMeta =>
-    val vcSlotInfos = s2_vcSlotInfos_opt.get
-    vcMeta.zipWithIndex.foreach { case (m, s) =>
-      m.hit := vcSlotInfos(s).hit
-      m.vcIdx := vcSlotInfos(s).vcIdx
-    }
-  }
   io.meta.vcSlotMetas.foreach { vcSlotMetas =>
-    val vcSlotInfos = s2_vcSlotInfos_opt.get
+    val vcSlotInfos   = s2_vcSlotInfos_opt.get
     val vcSlotEntries = s2_vcSlotEntries_opt.get
+    val vcSlotValid   = s2_vcSlotValid_opt.get
     for (s <- 0 until NumVCResultSlots) {
       val vcEntry = vcSlotEntries(s)
-      val info = vcSlotInfos(s)
-      vcSlotMetas(s).rawHit := info.hit
-      vcSlotMetas(s).position := Cat(info.posHigherBits, vcEntry.position)
+      val info    = vcSlotInfos(s)
+      vcSlotMetas(s).rawHit    := vcSlotValid(s)
+      vcSlotMetas(s).position  := Cat(info.posHigherBits, vcEntry.position)
       vcSlotMetas(s).attribute := vcEntry.attribute
-      vcSlotMetas(s).counter := vcEntry.counter
+      vcSlotMetas(s).counter   := vcEntry.counter
       vcSlotMetas(s).sramValid.foreach(_ := false.B)
       vcSlotMetas(s).sramTag.foreach(_ := 0.U)
       vcSlotMetas(s).targetLowerBits.foreach(_ := vcEntry.targetLowerBits)
@@ -245,13 +233,17 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     b.io.s3_takenMask := io.s3_takenMask.slice(i * NumWay, (i + 1) * NumWay)
   }
 
-  // VC S3 PLRU predTouch: touch taken VC entries
-  vc.foreach { vcModule =>
+  // VC S3 PLRU predTouch: route each taken VC slot to the alignBank that provided it
+  if (HasVC) {
     val s3_vcSlotInfos = RegEnable(s2_vcSlotInfos_opt.get, s2_fire)
+    val s3_vcSlotValid = RegEnable(s2_vcSlotValid_opt.get, s2_fire)
     for (s <- 0 until NumVCResultSlots) {
       val vcTaken = io.s3_takenMask(NumWay * NumAlignBanks + s)
-      vcModule.io.predTouch(s).valid := s3_fire && s3_vcSlotInfos(s).hit && vcTaken
-      vcModule.io.predTouch(s).bits := s3_vcSlotInfos(s).vcIdx
+      alignBanks.zipWithIndex.foreach { case (b, j) =>
+        b.io.s3_vcPredTouch.get(s).valid :=
+          s3_fire && s3_vcSlotValid(s) && vcTaken && s3_vcSlotInfos(s).sourceAlignBank === j.U
+        b.io.s3_vcPredTouch.get(s).bits := s3_vcSlotInfos(s).vcIdx
+      }
     }
   }
 
@@ -272,117 +264,22 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val t1_startPcVec = t1_rotator.rotate(
     VecInit.tabulate(NumAlignBanks)(i => getAlignedPc(t1_startPc + (i << FetchBlockAlignWidth).U))
   )
-  private val t1_meta           = t1_train.meta.mbtb
-  private val t1_mispredictInfo = t1_train.mispredictBranch
+  private val t1_posHigherBitsVec = t1_rotator.rotate(VecInit.tabulate(NumAlignBanks)(_.U(AlignBankIdxLen.W)))
+  private val t1_meta             = t1_train.meta.mbtb
+  private val t1_mispredictInfo   = t1_train.mispredictBranch
 
   private val t1_writeAlignBankIdx  = getAlignBankIndexFromPosition(t1_mispredictInfo.bits.cfiPosition)
   private val t1_writeAlignBankMask = t1_rotator.rotate(VecInit(UIntToOH(t1_writeAlignBankIdx).asBools))
 
   alignBanks.zipWithIndex.foreach { case (b, i) =>
-    b.io.write.req.valid          := t1_fire
-    b.io.write.req.bits.needWrite := t1_writeAlignBankMask(i)
-    b.io.write.req.bits.startPc   := t1_startPcVec(i)
-    b.io.write.req.bits.branches  := t1_train.branches
-    b.io.write.req.bits.meta      := t1_meta.entries(i)
+    b.io.write.req.valid              := t1_fire
+    b.io.write.req.bits.needWrite     := t1_writeAlignBankMask(i)
+    b.io.write.req.bits.startPc       := t1_startPcVec(i)
+    b.io.write.req.bits.posHigherBits := t1_posHigherBitsVec(i)
+    b.io.write.req.bits.branches      := t1_train.branches
+    b.io.write.req.bits.meta          := t1_meta.entries(i)
     // see comments in MainBtbAlignBank.scala
     b.io.write.req.bits.mispredictInfo := t1_mispredictInfo
-  }
-
-  /* *** T1 VC three-path routing *** */
-  vc.foreach { vcModule =>
-    // Recompute SRAM hit from meta (same logic as AlignBank)
-    val t1_activeMeta = Mux1H(t1_writeAlignBankMask, t1_meta.entries)
-    val t1_sramHitVec = VecInit(t1_activeMeta.map(_.hit(t1_mispredictInfo.bits)))
-    val t1_sramHit = t1_sramHitVec.asUInt.orR
-
-    // Read VC metas from FTQ
-    val t1_vcMetas = t1_meta.vc.get
-    val t1_mispredictAlignedPos = t1_mispredictInfo.bits.cfiPosition(CfiAlignedPositionWidth - 1, 0)
-
-    // Read VC entries via t1Read ports
-    for (s <- 0 until NumVCResultSlots) {
-      vcModule.io.t1Read(s).idx := t1_vcMetas(s).vcIdx
-    }
-
-    // Check each VC slot for misprediction match
-    val t1_vcSlotHits = VecInit((0 until NumVCResultSlots).map { s =>
-      val vcEntry = vcModule.io.t1Read(s).entry
-      // Reconstruct expected vcTag from the entry's source AB
-      val entryABIdx = vcEntry.vcTag(AlignBankIdxLen - 1, 0)
-      val expectedVcTag = makeVCTag(Mux1H(UIntToOH(entryABIdx, NumAlignBanks), t1_startPcVec))
-      t1_vcMetas(s).hit && vcEntry.valid &&
-        vcEntry.vcTag === expectedVcTag &&
-        vcEntry.position === t1_mispredictAlignedPos
-    })
-    val t1_vcHitFromReg = t1_vcSlotHits.asUInt.orR
-    val t1_vcHitSlotIdx = PriorityEncoder(t1_vcSlotHits.asUInt)
-    val t1_vcEntry = vcModule.io.t1Read(t1_vcHitSlotIdx).entry
-    val t1_activeVcMeta = Mux1H(t1_vcSlotHits, t1_vcMetas)
-
-    // T1 VC routing (mutually exclusive, only when mispredictInfo is valid)
-    val t1_vcActive = t1_fire && t1_mispredictInfo.valid
-    val t1_doInvalidateVc = t1_vcActive && t1_sramHit
-    val t1_doUpdateVc     = t1_vcActive && !t1_sramHit && t1_vcHitFromReg
-    val t1_doInsertVc     = t1_vcActive && !t1_sramHit && !t1_vcHitFromReg
-
-    // Invalidate: SRAM hit → remove VC duplicate
-    val t1_activeStartPc = Mux1H(t1_writeAlignBankMask, t1_startPcVec)
-    val t1_expectedVcTag = makeVCTag(t1_activeStartPc)
-    vcModule.io.invalidate.valid := t1_doInvalidateVc
-    vcModule.io.invalidate.bits.vcTag := t1_expectedVcTag
-    vcModule.io.invalidate.bits.position := t1_mispredictAlignedPos
-
-    // Update: VC hit → update entry in-place, suppress SRAM write
-    alignBanks.zipWithIndex.foreach { case (b, i) =>
-      b.io.vcSuppressWrite.foreach(_ := t1_doUpdateVc && t1_writeAlignBankMask(i))
-    }
-
-    val t1_vcUpdateEntry = Wire(new VCEntry)
-    t1_vcUpdateEntry := t1_vcEntry // start from existing entry
-    t1_vcUpdateEntry.targetLowerBits := getTargetLowerBits(t1_mispredictInfo.bits.target)
-    t1_vcUpdateEntry.targetCarry := getTargetCarry(t1_activeStartPc, t1_mispredictInfo.bits.target)
-    t1_vcUpdateEntry.attribute := t1_mispredictInfo.bits.attribute
-    // Counter preservation: update if conditional, reset if attribute changed or needIttage
-    val t1_vcAttrChanged = !(t1_mispredictInfo.bits.attribute === t1_vcEntry.attribute)
-    val t1_vcNeedReset = t1_vcAttrChanged || t1_mispredictInfo.bits.attribute.needIttage
-    t1_vcUpdateEntry.counter := Mux(
-      t1_vcNeedReset,
-      TakenCounter.WeakPositive,
-      Mux(
-        t1_mispredictInfo.bits.attribute.isConditional,
-        t1_vcEntry.counter.getUpdate(t1_mispredictInfo.bits.taken),
-        t1_vcEntry.counter
-      )
-    )
-    vcModule.io.update.valid := t1_doUpdateVc
-    vcModule.io.update.bits.idx := t1_activeVcMeta.vcIdx
-    vcModule.io.update.bits.entry := t1_vcUpdateEntry
-
-    // Insert: both miss → SRAM allocates, evicted entry goes to VC
-    val t1_victimWayMask = Mux1H(t1_writeAlignBankMask, alignBanks.map(_.io.replacerVictimWayMask.get))
-    val t1_evictedMeta = Mux1H(t1_victimWayMask, t1_activeMeta)
-    val t1_evictedVcEntry = Wire(new VCEntry)
-    t1_evictedVcEntry.valid := true.B
-    t1_evictedVcEntry.vcTag := Cat(
-      t1_evictedMeta.sramTag.get,
-      getSetIndex(t1_activeStartPc),
-      getInternalBankIndex(t1_activeStartPc),
-      getAlignBankIndex(t1_activeStartPc)
-    )
-    t1_evictedVcEntry.position := t1_evictedMeta.position(CfiAlignedPositionWidth - 1, 0)
-    t1_evictedVcEntry.attribute := t1_evictedMeta.attribute
-    t1_evictedVcEntry.targetCarry := t1_evictedMeta.targetCarry.get
-    t1_evictedVcEntry.targetLowerBits := t1_evictedMeta.targetLowerBits.get
-    t1_evictedVcEntry.counter := t1_evictedMeta.counter
-
-    vcModule.io.insert.valid := t1_doInsertVc && t1_evictedMeta.sramValid.get
-    vcModule.io.insert.bits.entry := t1_evictedVcEntry
-
-    // VC performance counters
-    XSPerfAccumulate("vc_train_invalidate", t1_doInvalidateVc)
-    XSPerfAccumulate("vc_train_update", t1_doUpdateVc)
-    XSPerfAccumulate("vc_train_both_miss", t1_doInsertVc)
-    XSPerfAccumulate("vc_train_insert", t1_doInsertVc && t1_evictedMeta.sramValid.get)
   }
 
   /* *** predecode-triggered SRAM + VC invalidation *** */
@@ -394,7 +291,7 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val pdInval_r1_alignBankIdx    = getAlignBankIndex(pdInval_r1_cfiPc)
   private val pdInval_r1_setIdx          = getSetIndex(pdInval_r1_cfiPc)
   private val pdInval_r1_internalBankIdx = getInternalBankIndex(pdInval_r1_cfiPc)
-  private val pdInval_r1_fullPosition    = Cat(
+  private val pdInval_r1_fullPosition = Cat(
     getAlignBankIndex(pdInval_r1_cfiPc),
     getAlignedInstOffset(pdInval_r1_cfiPc)
   )
@@ -406,17 +303,20 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
 
   // SRAM flush dispatch
   alignBanks.zipWithIndex.foreach { case (b, i) =>
-    b.io.pdFlush.valid                  := pdInval_r1_fire && pdInval_r1_wayMask.orR && pdInval_r1_alignBankMask(i)
-    b.io.pdFlush.bits.setIdx            := pdInval_r1_setIdx
-    b.io.pdFlush.bits.internalBankIdx   := pdInval_r1_internalBankIdx
-    b.io.pdFlush.bits.wayMask           := pdInval_r1_wayMask
+    b.io.pdFlush.valid                := pdInval_r1_fire && pdInval_r1_wayMask.orR && pdInval_r1_alignBankMask(i)
+    b.io.pdFlush.bits.setIdx          := pdInval_r1_setIdx
+    b.io.pdFlush.bits.internalBankIdx := pdInval_r1_internalBankIdx
+    b.io.pdFlush.bits.wayMask         := pdInval_r1_wayMask
   }
 
-  // VC CAM invalidation (always fire — no-op if no match)
-  vc.foreach { vcModule =>
-    vcModule.io.pdInvalidate.valid         := pdInval_r1_fire
-    vcModule.io.pdInvalidate.bits.vcTag    := makeVCTag(pdInval_r1_cfiPc)
-    vcModule.io.pdInvalidate.bits.position := getAlignedInstOffset(pdInval_r1_cfiPc)
+  // VC invalidation dispatch (always fire to the addressed alignBank, no-op if no match)
+  alignBanks.zipWithIndex.foreach { case (b, i) =>
+    b.io.pdVcInvalidate.foreach { pd =>
+      pd.valid                := pdInval_r1_fire && pdInval_r1_alignBankMask(i)
+      pd.bits.internalBankIdx := pdInval_r1_internalBankIdx
+      pd.bits.vcTag           := makeVCTag(pdInval_r1_cfiPc)
+      pd.bits.position        := getAlignedInstOffset(pdInval_r1_cfiPc)
+    }
   }
 
   XSPerfAccumulate("pd_invalidate", pdInval_r1_fire && pdInval_r1_wayMask.orR)
@@ -455,8 +355,9 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   XSPerfAccumulate("train_has_mispredict", t1_fire && t1_mispredictInfo.valid)
   XSPerfAccumulate("train_hit_mispredict", t1_fire && t1_mispredictInfo.valid && perf_t1HitMispredictBranch)
   XSPerfAccumulate("pred_miss", s2_fire && perf_s2HitMask.reduce(!_ && !_))
-  vc.foreach { _ =>
-    val vcSlotInfos = s2_vcSlotInfos_opt.get
-    XSPerfAccumulate("vc_s2_hit", s2_fire && vcSlotInfos.map(_.hit).reduce(_ || _))
+
+  if (HasVC) {
+    val perf_s2VcSlotValid = s2_vcSlotValid_opt.get
+    XSPerfAccumulate("vc_s2_hit", s2_fire && perf_s2VcSlotValid.reduce(_ || _))
   }
 }

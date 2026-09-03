@@ -17,6 +17,7 @@ package xiangshan.frontend.bpu.mbtb
 
 import chisel3._
 import chisel3.util._
+import utility.ParallelPriorityEncoder
 import utils.AddrField
 import xiangshan.HasXSParameter
 import xiangshan.frontend.PrunedAddr
@@ -68,9 +69,39 @@ trait Helpers extends HasMainBtbParameters
   def getTag(pc: PrunedAddr): UInt =
     addrFields.extract("tag", pc)
 
-  // Construct a fully-qualified VC tag from a per-AlignBank startPc
+  // VC tag from a per-AlignBank startPc, alignBank / internalBank are implied by the VC instance
   def makeVCTag(pc: PrunedAddr): UInt =
-    Cat(getTag(pc), getSetIndex(pc), getInternalBankIndex(pc), getAlignBankIndex(pc))
+    Cat(getTag(pc), getSetIndex(pc))
+
+  // Fully-associative VC lookup returning up to two hits: lower half first, upper half second
+  def vcLookup(entries: Vec[VCEntry], vcTag: UInt, alignedInstOffset: UInt, crossPage: Bool): VCLookupResp = {
+    val size     = entries.length
+    val halfSize = size / 2
+    val hitBits = VecInit(entries.map { e =>
+      e.valid && e.vcTag === vcTag && e.position >= alignedInstOffset && !crossPage
+    }).asUInt
+    val hitLo = hitBits(halfSize - 1, 0)
+    val hitHi = hitBits(size - 1, halfSize)
+    val loHit = hitLo.orR
+    val hiHit = hitHi.orR
+    // balanced-tree encoders on each half, so the two hits are found independently
+    val loInnerIdx = ParallelPriorityEncoder(hitLo)
+    val hiInnerIdx = ParallelPriorityEncoder(hitHi)
+    val loEntry    = VecInit(entries.take(halfSize))(loInnerIdx)
+    val hiEntry    = VecInit(entries.drop(halfSize))(hiInnerIdx)
+    val loIdx      = Cat(0.U(1.W), loInnerIdx)
+    val hiIdx      = Cat(1.U(1.W), hiInnerIdx)
+
+    // hit2 implies hit1: if only the upper half hits, promote it into the first slot
+    val resp = Wire(new VCLookupResp)
+    resp.hit1   := loHit || hiHit
+    resp.vcIdx1 := Mux(loHit, loIdx, hiIdx)
+    resp.entry1 := Mux(loHit, loEntry, hiEntry)
+    resp.hit2   := loHit && hiHit
+    resp.vcIdx2 := hiIdx
+    resp.entry2 := hiEntry
+    resp
+  }
 
   // detect multi-hit, return a mask indicating which way has multi-hit
   def detectMultiHit(hitMask: IndexedSeq[Bool], position: IndexedSeq[UInt]): UInt = {

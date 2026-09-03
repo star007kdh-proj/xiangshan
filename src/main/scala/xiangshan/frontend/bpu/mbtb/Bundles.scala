@@ -92,18 +92,21 @@ class VCEntry(implicit p: Parameters) extends MainBtbBundle {
   val counter:         SaturateCounter = TakenCounter()
 }
 
-// Per-AlignBank VC meta stored in FTQ (minimal)
-class VCMetaEntry(implicit p: Parameters) extends MainBtbBundle {
-  val hit:   Bool = Bool()
-  val vcIdx: UInt = UInt(VCIdxLen.W)
+// S1 VC lookup response of one AlignBank (up to two hits)
+class VCLookupResp(implicit p: Parameters) extends MainBtbBundle {
+  val hit1:   Bool    = Bool()
+  val vcIdx1: UInt    = UInt(VCIdxLen.W)
+  val entry1: VCEntry = new VCEntry
+  val hit2:   Bool    = Bool()
+  val vcIdx2: UInt    = UInt(VCIdxLen.W)
+  val entry2: VCEntry = new VCEntry
 }
 
-// Per-AlignBank VC prediction info, internal to MainBtb (piped S2 -> S3)
-// NOTE: Legacy type, retained for compilation but no longer used in the merge path.
-class VCAlignBankPredInfo(implicit p: Parameters) extends MainBtbBundle {
-  val hit:       Bool = Bool()
-  val vcIdx:     UInt = UInt(VCIdxLen.W)
-  val mergedWay: UInt = UInt(log2Ceil(NumWay).W)
+// Predecode-triggered VC invalidation, routed to one AlignBank
+class PdVcInvalidateReq(implicit p: Parameters) extends MainBtbBundle {
+  val internalBankIdx: UInt = UInt(InternalBankIdxLen.W)
+  val vcTag:           UInt = UInt(VCTagWidth.W)
+  val position:        UInt = UInt(CfiAlignedPositionWidth.W)
 }
 
 // Per-VC-result-slot info, internal to MainBtb (piped S1 -> S2 -> S3)
@@ -116,7 +119,6 @@ class VCResultSlotInfo(implicit p: Parameters) extends MainBtbBundle {
 
 class MainBtbMeta(implicit p: Parameters) extends MainBtbBundle {
   val entries: Vec[Vec[MainBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MainBtbMetaEntry))
-  val vc: Option[Vec[VCMetaEntry]] = Option.when(HasVC)(Vec(NumVCResultSlots, new VCMetaEntry))
   // VC slot metas in MainBtbMetaEntry form (for SC/TAGE training compatibility)
   val vcSlotMetas: Option[Vec[MainBtbMetaEntry]] =
     Option.when(HasVC)(Vec(NumVCResultSlots, new MainBtbMetaEntry))

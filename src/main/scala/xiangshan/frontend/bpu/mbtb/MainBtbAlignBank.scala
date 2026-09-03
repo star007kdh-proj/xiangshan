@@ -49,15 +49,19 @@ class MainBtbAlignBank(
       val resp: Resp = Output(new Resp)
 
       val s1_positions: Vec[UInt] = Output(Vec(NumWay, UInt(CfiPositionWidth.W)))
+
+      // VC lookup result of this bank (up to two hits), MainBtb top assigns them to result slots
+      val s1_vc: Option[VCLookupResp] = Option.when(HasVC)(Output(new VCLookupResp))
     }
 
     class Write extends Bundle {
       class Req extends Bundle {
         val needWrite: Bool = Bool()
         // similar to Read.Req.startPc, calculated in MainBtb top
-        val startPc:  PrunedAddr             = new PrunedAddr(VAddrBits)
-        val branches: Vec[Valid[BranchInfo]] = Vec(ResolveEntryBranchNumber, Valid(new BranchInfo))
-        val meta:     Vec[MainBtbMetaEntry]  = Vec(NumWay, new MainBtbMetaEntry)
+        val startPc:       PrunedAddr             = new PrunedAddr(VAddrBits)
+        val posHigherBits: UInt                   = UInt(AlignBankIdxLen.W)
+        val branches:      Vec[Valid[BranchInfo]] = Vec(ResolveEntryBranchNumber, Valid(new BranchInfo))
+        val meta:          Vec[MainBtbMetaEntry]  = Vec(NumWay, new MainBtbMetaEntry)
         // mispredictBranch is actually Mux1H(branches.map(b => b.valid && b.mispredict), b.bits),
         // but we still pass it through a port anyway,
         // perhaps in the future we can move this Mux1H to prior stages for better timing.
@@ -77,10 +81,10 @@ class MainBtbAlignBank(
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumWay, Bool()))
 
-    // VC support
-    val s1_rawValidBits:       Option[Vec[Bool]] = Option.when(HasVC)(Output(Vec(NumWay, Bool())))
-    val vcSuppressWrite:       Option[Bool]      = Option.when(HasVC)(Input(Bool()))
-    val replacerVictimWayMask: Option[UInt]      = Option.when(HasVC)(Output(UInt(NumWay.W)))
+    // VC support: S3 replacer touch per VC result slot, predecode invalidation
+    val s3_vcPredTouch: Option[Vec[Valid[UInt]]] =
+      Option.when(HasVC)(Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W)))))
+    val pdVcInvalidate: Option[Valid[PdVcInvalidateReq]] = Option.when(HasVC)(Flipped(Valid(new PdVcInvalidateReq)))
 
     // predecode flush
     val pdFlush: Valid[PdFlushReq] = Flipped(Valid(new PdFlushReq))
@@ -97,6 +101,9 @@ class MainBtbAlignBank(
   }
 
   private val replacer = Module(new MainBtbReplacer)
+
+  // one VC per internal bank, so a lookup only compares entries of the same (alignBank, internalBank)
+  private val vcs = Option.when(HasVC)(Seq.tabulate(NumInternalBanks)(_ => Module(new MainBtbVictimCache)))
 
   io.resetDone := internalBanks.map(_.io.resetDone).reduce(_ && _)
 
@@ -142,8 +149,16 @@ class MainBtbAlignBank(
 
   io.read.s1_positions := VecInit(s1_rawEntries.map(e => Cat(s1_posHigherBits, e.position)))
 
-  // VC: expose raw SRAM valid bits at S1 so MainBtb can identify empty slots for VC position override
-  io.s1_rawValidBits.foreach(_ := VecInit(s1_rawEntries.map(_.valid)))
+  // VC lookup: select this fetch block's internal bank first, then compare all of its entries
+  vcs.foreach { vcs =>
+    val s1_vcEntries = Mux1H(s1_internalBankMask, vcs.map(_.io.entries))
+    io.read.s1_vc.get := vcLookup(
+      s1_vcEntries,
+      makeVCTag(s1_startPc),
+      getAlignedInstOffset(s1_startPc),
+      s1_crossPage
+    )
+  }
 
   /* *** s2 ***
    * check entries hit
@@ -199,9 +214,10 @@ class MainBtbAlignBank(
   /* *** s3 ***
    * touch replacer using final takenMask (mbtb + tage + sc)
    */
-  private val s3_fire           = io.stageCtrl.s3_fire
-  private val s3_replacerSetIdx = RegEnable(getReplacerSetIndex(s2_startPc), s2_fire)
-  private val s3_takenMask      = io.s3_takenMask
+  private val s3_fire             = io.stageCtrl.s3_fire
+  private val s3_replacerSetIdx   = RegEnable(getReplacerSetIndex(s2_startPc), s2_fire)
+  private val s3_internalBankMask = RegEnable(s2_internalBankMask, s2_fire)
+  private val s3_takenMask        = io.s3_takenMask
 
   // touch taken entries only: not-taken conditional entries are considered not very useful and should be killed first
   replacer.io.predictTouch.valid        := s3_fire && s3_takenMask.reduce(_ || _)
@@ -214,6 +230,7 @@ class MainBtbAlignBank(
   private val t1_fire             = w.req.valid
   private val t1_needWrite        = w.req.bits.needWrite
   private val t1_startPc          = w.req.bits.startPc
+  private val t1_posHigherBits    = w.req.bits.posHigherBits
   private val t1_branches         = w.req.bits.branches
   private val t1_meta             = w.req.bits.meta
   private val t1_mispredictInfo   = w.req.bits.mispredictInfo
@@ -237,8 +254,9 @@ class MainBtbAlignBank(
       //   b. attribute changed, probably indicating a software self-modification.
       !(t1_mispredictInfo.bits.attribute === Mux1H(t1_hitMask, t1_meta.map(_.attribute)))
   )
-  // VC Path B: suppress SRAM write when MainBtb handles the update in VC instead
-  private val t1_entryNeedWrite = t1_entryNeedWriteRaw && !io.vcSuppressWrite.getOrElse(false.B)
+  // VC Path B: the mispredicted branch is repaired in VC instead of being allocated back into SRAM
+  private val t1_vcSuppressWrite = WireDefault(false.B)
+  private val t1_entryNeedWrite  = t1_entryNeedWriteRaw && !t1_vcSuppressWrite
   // Use hit wayMask if hit, else use replacer's victim way
   private val t1_entryWayMask = Mux(t1_hit, t1_hitMask, replacer.io.victim.wayMask)
 
@@ -265,9 +283,6 @@ class MainBtbAlignBank(
   replacer.io.trainTouch.bits.setIdx  := getReplacerSetIndex(t1_startPc)
   replacer.io.trainTouch.bits.wayMask := t1_entryWayMask
 
-  // VC Path C: expose the replacer's victim way mask for eviction capture
-  io.replacerVictimWayMask.foreach(_ := replacer.io.victim.wayMask)
-
   /* *** update counter *** */
   private val t1_newCounters    = Wire(Vec(NumWay, TakenCounter()))
   private val t1_counterWayMask = Wire(Vec(NumWay, Bool()))
@@ -292,6 +307,93 @@ class MainBtbAlignBank(
     b.io.writeCounter.req.bits.setIdx   := t1_setIdx
     b.io.writeCounter.req.bits.wayMask  := t1_counterWayMask.asUInt
     b.io.writeCounter.req.bits.counters := t1_newCounters
+  }
+
+  /* *** victim cache: T1 CAM, three-path training, invalidation routing *** */
+  vcs.foreach { vcs =>
+    val t1_vcEntries   = Mux1H(t1_internalBankMask, vcs.map(_.io.entries))
+    val t1_vcTag       = makeVCTag(t1_startPc)
+    val t1_vcTagMatch  = VecInit(t1_vcEntries.map(e => e.valid && e.vcTag === t1_vcTag))
+    val t1_vcPositions = VecInit(t1_vcEntries.map(e => Cat(t1_posHigherBits, e.position)))
+
+    // CAM for the mispredicted branch, independent of whether VC hit at prediction time
+    val t1_vcHitMask = VecInit((t1_vcTagMatch zip t1_vcPositions).map { case (tagMatch, pos) =>
+      tagMatch && pos === t1_mispredictInfo.bits.cfiPosition
+    })
+    val t1_vcHit      = t1_vcHitMask.asUInt.orR
+    val t1_vcHitIdx   = PriorityEncoder(t1_vcHitMask.asUInt)
+    val t1_vcHitEntry = t1_vcEntries(t1_vcHitIdx)
+
+    // Path A: SRAM hit -> SRAM is authoritative, drop the VC copy
+    // Path B: SRAM miss, VC hit -> repair VC in place, suppress SRAM allocation
+    // Path C: both miss -> SRAM allocates, its evicted entry goes to VC
+    val t1_vcActive       = t1_fire && t1_needWrite && t1_mispredictInfo.valid
+    val t1_doInvalidateVc = t1_vcActive && t1_hit && t1_vcHit
+    val t1_doUpdateVc     = t1_vcActive && !t1_hit && t1_vcHit
+    val t1_doInsertVc     = t1_vcActive && !t1_hit && !t1_vcHit
+    t1_vcSuppressWrite := t1_doUpdateVc
+
+    // Path B entry: keep the counter unless attribute changed or the target must be refreshed
+    val t1_vcUpdateEntry = WireInit(t1_vcHitEntry)
+    t1_vcUpdateEntry.targetLowerBits := getTargetLowerBits(t1_mispredictInfo.bits.target)
+    t1_vcUpdateEntry.targetCarry     := getTargetCarry(t1_startPc, t1_mispredictInfo.bits.target)
+    t1_vcUpdateEntry.attribute       := t1_mispredictInfo.bits.attribute
+    val t1_vcAttrChanged = !(t1_mispredictInfo.bits.attribute === t1_vcHitEntry.attribute)
+    val t1_vcNeedReset   = t1_vcAttrChanged || t1_mispredictInfo.bits.attribute.needIttage
+    t1_vcUpdateEntry.counter := Mux(
+      t1_vcNeedReset,
+      TakenCounter.WeakPositive,
+      Mux(
+        t1_mispredictInfo.bits.attribute.isConditional,
+        t1_vcHitEntry.counter.getUpdate(t1_mispredictInfo.bits.taken),
+        t1_vcHitEntry.counter
+      )
+    )
+
+    // Path C entry: the SRAM way about to be overwritten, reconstructed from prediction-time meta
+    val t1_evictedMeta  = Mux1H(t1_entryWayMask, t1_meta)
+    val t1_evictedEntry = Wire(new VCEntry)
+    t1_evictedEntry.valid           := true.B
+    t1_evictedEntry.vcTag           := Cat(t1_evictedMeta.sramTag.get, t1_setIdx)
+    t1_evictedEntry.position        := t1_evictedMeta.position(CfiAlignedPositionWidth - 1, 0)
+    t1_evictedEntry.attribute       := t1_evictedMeta.attribute
+    t1_evictedEntry.targetCarry     := t1_evictedMeta.targetCarry.get
+    t1_evictedEntry.targetLowerBits := t1_evictedMeta.targetLowerBits.get
+    t1_evictedEntry.counter         := t1_evictedMeta.counter
+    val t1_vcInsertValid = t1_doInsertVc && t1_entryNeedWrite && t1_evictedMeta.sramValid.get
+
+    // Predecode ghost entry: CAM the addressed internal bank's entries
+    val pd         = io.pdVcInvalidate.get
+    val pdBankMask = UIntToOH(pd.bits.internalBankIdx, NumInternalBanks)
+    val pdEntries  = Mux1H(pdBankMask, vcs.map(_.io.entries))
+    val pdMask = VecInit(pdEntries.map { e =>
+      e.valid && e.vcTag === pd.bits.vcTag && e.position === pd.bits.position
+    }).asUInt
+
+    // route everything to the addressed VC instance
+    vcs.zipWithIndex.foreach { case (vc, i) =>
+      val t1_mask = Mux(t1_doInvalidateVc && t1_internalBankMask(i), t1_vcHitMask.asUInt, 0.U(VCSize.W))
+      val pdMaskI = Mux(pd.valid && pdBankMask(i), pdMask, 0.U(VCSize.W))
+      vc.io.invalidateMask := t1_mask | pdMaskI
+
+      vc.io.update.valid      := t1_doUpdateVc && t1_internalBankMask(i)
+      vc.io.update.bits.idx   := t1_vcHitIdx
+      vc.io.update.bits.entry := t1_vcUpdateEntry
+
+      vc.io.insert.valid      := t1_vcInsertValid && t1_internalBankMask(i)
+      vc.io.insert.bits.entry := t1_evictedEntry
+
+      (vc.io.predTouch zip io.s3_vcPredTouch.get).foreach { case (port, touch) =>
+        port.valid := touch.valid && s3_internalBankMask(i)
+        port.bits  := touch.bits
+      }
+    }
+
+    XSPerfAccumulate("vc_train_invalidate", t1_doInvalidateVc)
+    XSPerfAccumulate("vc_train_update", t1_doUpdateVc)
+    XSPerfAccumulate("vc_train_both_miss", t1_doInsertVc)
+    XSPerfAccumulate("vc_train_insert", t1_vcInsertValid)
+    XSPerfAccumulate("vc_pd_invalidate", pd.valid && pdMask.orR)
   }
 
   /* *** multi-hit detection & predecode flush *** */

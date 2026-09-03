@@ -35,7 +35,7 @@ case class MainBtbParameters(
     Replacer:        String = "Lru", // "Lru" or "Plru"
     // Base table
     TakenCntWidth: Int = 2,
-    // Victim cache: 0 = disabled, must be power of 2 when enabled. Recommended: 8.
+    // Victim cache: entries per (alignBank, internalBank) instance, 0 = disabled, power of 2 when enabled
     VCSize: Int = 0,
     // Mbtb write trace
     EnableMainbtbTrace: Boolean = false
@@ -62,12 +62,12 @@ trait HasMainBtbParameters extends HasBpuParameters {
   // Base table
   def TakenCntWidth: Int = mbtbParameters.TakenCntWidth
 
-  // Victim cache
-  def VCSize:     Int     = mbtbParameters.VCSize
-  def HasVC:      Boolean = VCSize > 0
-  def VCTagWidth: Int     = TagWidth + SetIdxLen + InternalBankIdxLen + AlignBankIdxLen
-  def VCIdxLen:          Int = if (HasVC) log2Ceil(VCSize) else 0
-  def NumVCResultSlots:  Int = if (HasVC) NumAlignBanks else 0
+  // Victim cache: one fully-associative instance per (alignBank, internalBank), so the tag omits both bank indices
+  def VCSize:           Int     = mbtbParameters.VCSize
+  def HasVC:            Boolean = VCSize > 0
+  def VCTagWidth:       Int     = TagWidth + SetIdxLen
+  def VCIdxLen:         Int     = if (HasVC) log2Ceil(VCSize) else 0
+  def NumVCResultSlots: Int     = if (HasVC) NumAlignBanks else 0
 
   // Used in any aligned-addr-indexed predictor, indicates the position relative to the aligned start addr
   def CfiAlignedPositionWidth: Int = CfiPositionWidth - AlignBankIdxLen
