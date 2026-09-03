@@ -81,7 +81,9 @@ class MainBtbAlignBank(
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumWay, Bool()))
 
-    // VC support: S3 replacer touch per VC result slot, predecode invalidation
+    // VC support: S2 duplicate invalidation and S3 replacer touch per VC result slot, predecode invalidation
+    val s2_vcInvalidate: Option[Vec[Valid[UInt]]] =
+      Option.when(HasVC)(Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W)))))
     val s3_vcPredTouch: Option[Vec[Valid[UInt]]] =
       Option.when(HasVC)(Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W)))))
     val pdVcInvalidate: Option[Valid[PdVcInvalidateReq]] = Option.when(HasVC)(Flipped(Valid(new PdVcInvalidateReq)))
@@ -383,9 +385,12 @@ class MainBtbAlignBank(
 
     // route everything to the addressed VC instance
     vcs.zipWithIndex.foreach { case (vc, i) =>
+      val s2_mask = io.s2_vcInvalidate.get.map { inv =>
+        Mux(inv.valid && s2_internalBankMask(i), UIntToOH(inv.bits, VCSize), 0.U(VCSize.W))
+      }.reduce(_ | _)
       val t1_mask = Mux(t1_doInvalidateVc && t1_internalBankMask(i), t1_vcHitMask.asUInt, 0.U(VCSize.W))
       val pdMaskI = Mux(pd.valid && pdBankMask(i), pdMask, 0.U(VCSize.W))
-      vc.io.invalidateMask := t1_mask | pdMaskI
+      vc.io.invalidateMask := s2_mask | t1_mask | pdMaskI
 
       vc.io.update.valid      := t1_doUpdateVc && t1_internalBankMask(i)
       vc.io.update.bits.idx   := t1_vcHitIdx

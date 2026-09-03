@@ -162,6 +162,7 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   /* *** s2 ***
    * receive read response from alignBanks
    * assign SRAM predictions to result[0..7] and VC predictions to result[8..9]
+   * drop VC slots that duplicate an SRAM hit at the same position, and invalidate that VC entry
    * send out prediction result and meta info
    */
   s2_fire := io.stageCtrl.s2_fire && io.enable
@@ -169,8 +170,9 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val s2_rawPredictions = VecInit(alignBanks.flatMap(_.io.read.resp.predictions))
   io.meta.entries := VecInit(alignBanks.map(_.io.read.resp.metas))
 
-  // VC slot valid, piped to S3 for replacer touch
+  // VC slot valid after duplicate check, piped to S3 for replacer touch
   private val s2_vcSlotValid_opt = Option.when(HasVC)(Wire(Vec(NumVCResultSlots, Bool())))
+  private val s2_vcSlotDup_opt   = Option.when(HasVC)(Wire(Vec(NumVCResultSlots, Bool())))
 
   // Assign io.result: SRAM predictions + dedicated VC slots
   if (HasVC) {
@@ -183,13 +185,17 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     val vcSlotEntries = s2_vcSlotEntries_opt.get
     val startPcVec    = s2_startPcVec_opt.get
     val vcSlotValid   = s2_vcSlotValid_opt.get
+    val vcSlotDup     = s2_vcSlotDup_opt.get
     for (s <- 0 until NumVCResultSlots) {
       val idx          = NumWay * NumAlignBanks + s
       val vcEntry      = vcSlotEntries(s)
       val info         = vcSlotInfos(s)
       val slotPosition = Cat(info.posHigherBits, vcEntry.position)
 
-      vcSlotValid(s) := info.hit
+      // SRAM already predicts this position, so the VC copy is stale: drop it and invalidate the entry
+      vcSlotDup(s) := info.hit &&
+        s2_rawPredictions.map(pred => pred.valid && pred.bits.cfiPosition === slotPosition).reduce(_ || _)
+      vcSlotValid(s) := info.hit && !vcSlotDup(s)
 
       io.result(idx).valid            := vcSlotValid(s)
       io.result(idx).bits.cfiPosition := slotPosition
@@ -200,6 +206,11 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
       )
       io.result(idx).bits.attribute := vcEntry.attribute
       io.result(idx).bits.taken     := vcEntry.counter.isPositive
+
+      alignBanks.zipWithIndex.foreach { case (b, j) =>
+        b.io.s2_vcInvalidate.get(s).valid := s2_fire && vcSlotDup(s) && info.sourceAlignBank === j.U
+        b.io.s2_vcInvalidate.get(s).bits  := info.vcIdx
+      }
     }
   } else {
     io.result := s2_rawPredictions
@@ -358,6 +369,8 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
 
   if (HasVC) {
     val perf_s2VcSlotValid = s2_vcSlotValid_opt.get
+    val perf_s2VcSlotDup   = s2_vcSlotDup_opt.get
     XSPerfAccumulate("vc_s2_hit", s2_fire && perf_s2VcSlotValid.reduce(_ || _))
+    XSPerfAccumulate("vc_s2_dup_flush", Mux(s2_fire, PopCount(perf_s2VcSlotDup), 0.U))
   }
 }
