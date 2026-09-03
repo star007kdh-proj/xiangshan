@@ -370,7 +370,23 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   if (HasVC) {
     val perf_s2VcSlotValid = s2_vcSlotValid_opt.get
     val perf_s2VcSlotDup   = s2_vcSlotDup_opt.get
+    val perf_s2VcTaken = VecInit((0 until NumVCResultSlots).map { s =>
+      perf_s2VcSlotValid(s) && io.result(NumWay * NumAlignBanks + s).bits.taken
+    })
+    val perf_s2VcNotTaken = VecInit((0 until NumVCResultSlots).map { s =>
+      perf_s2VcSlotValid(s) && !io.result(NumWay * NumAlignBanks + s).bits.taken
+    })
     XSPerfAccumulate("vc_s2_hit", s2_fire && perf_s2VcSlotValid.reduce(_ || _))
+    XSPerfAccumulate("vc_hit_taken", Mux(s2_fire, PopCount(perf_s2VcTaken), 0.U))
+    XSPerfAccumulate("vc_hit_not_taken", Mux(s2_fire, PopCount(perf_s2VcNotTaken), 0.U))
     XSPerfAccumulate("vc_s2_dup_flush", Mux(s2_fire, PopCount(perf_s2VcSlotDup), 0.U))
+
+    // T1: VC hit of the mispredicted branch, and how often prediction-time VC lookup missed it
+    val perf_t1VcHit = Mux1H(t1_writeAlignBankMask, alignBanks.map(_.io.t1_vcHit.get))
+    val perf_t1VcPredHit = t1_meta.vcSlotMetas.get.map { m =>
+      m.rawHit && m.position === t1_mispredictInfo.bits.cfiPosition
+    }.reduce(_ || _)
+    XSPerfAccumulate("vc_t1_hit", t1_fire && t1_mispredictInfo.valid && perf_t1VcHit)
+    XSPerfAccumulate("vc_t1_hit_no_pred_hit", t1_fire && t1_mispredictInfo.valid && perf_t1VcHit && !perf_t1VcPredHit)
   }
 }

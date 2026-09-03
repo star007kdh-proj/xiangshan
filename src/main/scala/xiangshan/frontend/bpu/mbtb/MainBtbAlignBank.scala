@@ -87,6 +87,8 @@ class MainBtbAlignBank(
     val s3_vcPredTouch: Option[Vec[Valid[UInt]]] =
       Option.when(HasVC)(Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W)))))
     val pdVcInvalidate: Option[Valid[PdVcInvalidateReq]] = Option.when(HasVC)(Flipped(Valid(new PdVcInvalidateReq)))
+    // T1 VC hit of the mispredicted branch, for statistics in MainBtb top
+    val t1_vcHit: Option[Bool] = Option.when(HasVC)(Output(Bool()))
 
     // predecode flush
     val pdFlush: Valid[PdFlushReq] = Flipped(Valid(new PdFlushReq))
@@ -325,6 +327,7 @@ class MainBtbAlignBank(
     val t1_vcHit      = t1_vcHitMask.asUInt.orR
     val t1_vcHitIdx   = PriorityEncoder(t1_vcHitMask.asUInt)
     val t1_vcHitEntry = t1_vcEntries(t1_vcHitIdx)
+    io.t1_vcHit.get := t1_vcHit
 
     // Path A: SRAM hit -> SRAM is authoritative, drop the VC copy
     // Path B: SRAM miss, VC hit -> repair VC in place, suppress SRAM allocation
