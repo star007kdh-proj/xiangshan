@@ -60,17 +60,35 @@ class MainBtbEntrySramWriteReq(implicit p: Parameters) extends WriteReqBundle wi
   override def tag: Option[UInt] = Some(Cat(entry.tag, entry.position)) // use entry's tag directly
 }
 
+// Direction state kept in the counter SRAM: a conditional branch starts always-taken and the bit is cleared for good
+// on its first not-taken resolve; the counter is frozen while the bit is set (gem5 BTBEntry.alwaysTaken semantics)
+class MainBtbDirectionEntry(implicit p: Parameters) extends MainBtbBundle {
+  val alwaysTaken: Bool            = Bool()
+  val counter:     SaturateCounter = TakenCounter()
+}
+
+object MainBtbDirectionEntry {
+  // fresh state of a newly written entry: always-taken only for a conditional branch seen taken
+  def init(alwaysTaken: Bool)(implicit p: Parameters): MainBtbDirectionEntry = {
+    val e = Wire(new MainBtbDirectionEntry)
+    e.alwaysTaken := alwaysTaken
+    e.counter     := TakenCounter.WeakPositive
+    e
+  }
+}
+
 class MainBtbCounterSramWriteReq(implicit p: Parameters) extends MainBtbBundle {
   val setIdx:   UInt                 = UInt(SetIdxLen.W)
   val wayMask:  UInt                 = UInt(NumWay.W)
-  val counters: Vec[SaturateCounter] = Vec(NumWay, TakenCounter())
+  val counters: Vec[MainBtbDirectionEntry] = Vec(NumWay, new MainBtbDirectionEntry)
 }
 
 class MainBtbMetaEntry(implicit p: Parameters) extends MainBtbBundle {
-  val rawHit:    Bool            = Bool()
-  val position:  UInt            = UInt(CfiPositionWidth.W)
-  val attribute: BranchAttribute = new BranchAttribute
-  val counter:   SaturateCounter = TakenCounter()
+  val rawHit:      Bool            = Bool()
+  val position:    UInt            = UInt(CfiPositionWidth.W)
+  val attribute:   BranchAttribute = new BranchAttribute
+  val counter:     SaturateCounter = TakenCounter()
+  val alwaysTaken: Bool            = Bool()
 
   // VC: SRAM snapshot fields needed to reconstruct evicted entries at T1 (Path C)
   val sramValid:       Option[Bool]        = Option.when(HasVC)(Bool())
@@ -90,6 +108,7 @@ class VCEntry(implicit p: Parameters) extends MainBtbBundle {
   val targetCarry:     TargetCarry     = new TargetCarry
   val targetLowerBits: UInt            = UInt(TargetWidth.W)
   val counter:         SaturateCounter = TakenCounter()
+  val alwaysTaken:     Bool            = Bool()
 }
 
 // Per-AlignBank VC meta stored in FTQ (minimal)

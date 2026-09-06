@@ -42,6 +42,8 @@ class MainBtbAlignBank(
       class Resp extends Bundle {
         val predictions: Vec[Valid[Prediction]] = Vec(NumWay, Valid(new Prediction))
         val metas:       Vec[MainBtbMetaEntry]  = Vec(NumWay, new MainBtbMetaEntry)
+        // per-way always-taken hint for conditional hits, same timing as predictions
+        val alwaysTaken: Vec[Bool] = Vec(NumWay, Bool())
       }
       // don't need Valid or Decoupled here, AlignBank's pipeline is coupled with top, so we use stageCtrl to control
       val req: Req = Input(new Req)
@@ -168,7 +170,8 @@ class MainBtbAlignBank(
   private val s2_alignedInstOffset = getAlignedInstOffset(s2_startPc)
 
   // send resp
-  (r.resp.predictions zip r.resp.metas zip s2_rawEntries zip s2_rawCounters).foreach { case (((pred, meta), e), c) =>
+  (r.resp.predictions zip r.resp.metas zip r.resp.alwaysTaken zip s2_rawEntries zip s2_rawCounters).foreach {
+    case ((((pred, meta), alwaysTaken), e), c) =>
     // send rawHit for training
     val rawHit = e.valid && e.tag === s2_tag
     // filter out branches before alignedInstOffset
@@ -178,12 +181,14 @@ class MainBtbAlignBank(
     pred.bits.cfiPosition := Cat(s2_posHigherBits, e.position)
     pred.bits.target      := getFullTarget(s2_startPc, e.targetLowerBits, Some(e.targetCarry))
     pred.bits.attribute   := e.attribute
-    pred.bits.taken       := c.isPositive
+    pred.bits.taken       := c.counter.isPositive // pure counter view, TAGE keeps this as its base prediction
+    alwaysTaken           := hit && e.attribute.isConditional && c.alwaysTaken
 
-    meta.rawHit    := rawHit
-    meta.attribute := e.attribute
-    meta.position  := Cat(s2_posHigherBits, e.position)
-    meta.counter   := c
+    meta.rawHit      := rawHit
+    meta.attribute   := e.attribute
+    meta.position    := Cat(s2_posHigherBits, e.position)
+    meta.counter     := c.counter
+    meta.alwaysTaken := c.alwaysTaken
 
     // VC: SRAM snapshot for reconstructing evicted entries at T1
     meta.sramValid.foreach(_ := e.valid)
@@ -268,9 +273,12 @@ class MainBtbAlignBank(
   // VC Path C: expose the replacer's victim way mask for eviction capture
   io.replacerVictimWayMask.foreach(_ := replacer.io.victim.wayMask)
 
-  /* *** update counter *** */
-  private val t1_newCounters    = Wire(Vec(NumWay, TakenCounter()))
+  /* *** update counter + always-taken *** */
+  private val t1_newDirections        = Wire(Vec(NumWay, new MainBtbDirectionEntry))
   private val t1_counterWayMask = Wire(Vec(NumWay, Bool()))
+  // a freshly written conditional entry starts always-taken unless this very resolve saw it not-taken
+  private val t1_allocAlwaysTaken =
+    t1_mispredictInfo.bits.attribute.isConditional && t1_mispredictInfo.bits.taken
 
   t1_meta.zipWithIndex.foreach { case (meta, i) =>
     val hitMask = t1_branches.map { branch =>
@@ -280,8 +288,14 @@ class MainBtbAlignBank(
 
     val entryOverridden = t1_entryNeedWrite && t1_entryWayMask(i)
 
+    // the bit is cleared for good on the first not-taken; the counter is frozen while the bit stays set
+    val nextAlwaysTaken = meta.alwaysTaken && actualTaken
+    val updated = Wire(new MainBtbDirectionEntry)
+    updated.alwaysTaken := nextAlwaysTaken
+    updated.counter     := Mux(nextAlwaysTaken, meta.counter, meta.counter.getUpdate(actualTaken))
+
     t1_counterWayMask(i) := entryOverridden || hitMask.reduce(_ || _)
-    t1_newCounters(i)    := Mux(entryOverridden, TakenCounter.WeakPositive, meta.counter.getUpdate(actualTaken))
+    t1_newDirections(i)        := Mux(entryOverridden, MainBtbDirectionEntry.init(t1_allocAlwaysTaken), updated)
   }
 
   // write counter anytime when needed
@@ -291,8 +305,16 @@ class MainBtbAlignBank(
     b.io.writeCounter.req.valid         := t1_fire && t1_counterNeedWrite && t1_internalBankMask(i)
     b.io.writeCounter.req.bits.setIdx   := t1_setIdx
     b.io.writeCounter.req.bits.wayMask  := t1_counterWayMask.asUInt
-    b.io.writeCounter.req.bits.counters := t1_newCounters
+    b.io.writeCounter.req.bits.counters := t1_newDirections
   }
+
+  // always-taken dynamics: set on write, clear on the first not-taken of a hit way
+  private val t1_alwaysTakenSetMask = VecInit(t1_counterWayMask.zip(t1_newDirections).zip(t1_meta).map {
+    case ((written, next), meta) => written && next.alwaysTaken && !meta.alwaysTaken
+  })
+  private val t1_alwaysTakenClearMask = VecInit(t1_counterWayMask.zip(t1_newDirections).zip(t1_meta).map {
+    case ((written, next), meta) => written && !next.alwaysTaken && meta.alwaysTaken
+  })
 
   /* *** multi-hit detection & predecode flush *** */
   private val s2_multiHitMask  = detectMultiHit(s2_hitMask, VecInit(s2_rawEntries.map(_.position)))
@@ -328,5 +350,8 @@ class MainBtbAlignBank(
   )
 
   XSPerfAccumulate("updateCounter", Mux(t1_fire, PopCount(t1_counterWayMask), 0.U))
+  XSPerfAccumulate("alwaysTakenSet", Mux(t1_fire, PopCount(t1_alwaysTakenSetMask), 0.U))
+  XSPerfAccumulate("alwaysTakenClear", Mux(t1_fire, PopCount(t1_alwaysTakenClearMask), 0.U))
+  XSPerfAccumulate("predAlwaysTakenHit", Mux(s2_fire, PopCount(r.resp.alwaysTaken), 0.U))
   XSPerfAccumulate("replacerTakenTouch", t1_fire && !t1_entryNeedWrite && t1_actualTakenMask.reduce(_ || _))
 }

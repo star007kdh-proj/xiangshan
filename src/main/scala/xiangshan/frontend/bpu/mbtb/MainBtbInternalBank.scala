@@ -20,7 +20,6 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.XSPerfAccumulate
 import utility.sram.SRAMTemplate
-import xiangshan.frontend.bpu.SaturateCounter
 import xiangshan.frontend.bpu.WriteBuffer
 
 class MainBtbInternalBank(
@@ -34,7 +33,7 @@ class MainBtbInternalBank(
       }
       class Resp extends Bundle {
         val entries:  Vec[MainBtbEntry]    = Vec(NumWay, new MainBtbEntry)
-        val counters: Vec[SaturateCounter] = Vec(NumWay, TakenCounter())
+        val counters: Vec[MainBtbDirectionEntry] = Vec(NumWay, new MainBtbDirectionEntry)
       }
 
       val req:  Valid[Req] = Flipped(Valid(new Req))
@@ -55,7 +54,7 @@ class MainBtbInternalBank(
       class Req extends Bundle {
         val setIdx:   UInt                 = UInt(SetIdxLen.W)
         val wayMask:  UInt                 = UInt(NumWay.W)
-        val counters: Vec[SaturateCounter] = Vec(NumWay, TakenCounter())
+        val counters: Vec[MainBtbDirectionEntry] = Vec(NumWay, new MainBtbDirectionEntry)
       }
 
       val req: Valid[Req] = Flipped(Valid(new Req))
@@ -105,8 +104,9 @@ class MainBtbInternalBank(
   }
 
   // we often need to update counter, but not the whole entry, so store counters in separate SRAMs for better power
+  // the always-taken bit rides along since it changes on the same resolves
   private val counterSram = Module(new SRAMTemplate(
-    TakenCounter(),
+    new MainBtbDirectionEntry,
     set = NumSets,
     way = NumWay,
     singlePort = true,

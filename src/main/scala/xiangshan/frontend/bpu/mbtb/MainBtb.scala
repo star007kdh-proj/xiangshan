@@ -36,6 +36,9 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     // timing optimization: send positions earlier to TAGE
     val s1_positions: Vec[UInt] = Output(Vec(NumBtbPredEntries, UInt(CfiPositionWidth.W)))
 
+    // per-result always-taken hint for conditional hits (same timing as result), kept out of Prediction on purpose
+    val alwaysTaken: Vec[Bool] = Output(Vec(NumBtbPredEntries, Bool()))
+
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumBtbPredEntries, Bool()))
 
@@ -182,13 +185,15 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   s2_fire := io.stageCtrl.s2_fire && io.enable
 
   private val s2_rawPredictions = VecInit(alignBanks.flatMap(_.io.read.resp.predictions))
+  private val s2_rawAlwaysTaken = VecInit(alignBanks.flatMap(_.io.read.resp.alwaysTaken))
   io.meta.entries := VecInit(alignBanks.map(_.io.read.resp.metas))
 
   // Assign io.result: SRAM predictions + dedicated VC slots
   if (HasVC) {
     // SRAM part (0..NumWay*NumAlignBanks-1): pure SRAM, no VC merge
     for (k <- 0 until NumWay * NumAlignBanks) {
-      io.result(k) := s2_rawPredictions(k)
+      io.result(k)      := s2_rawPredictions(k)
+      io.alwaysTaken(k) := s2_rawAlwaysTaken(k)
     }
     // VC slots (NumWay*NumAlignBanks..NumBtbResultEntries-1)
     val vcSlotInfos = s2_vcSlotInfos_opt.get
@@ -206,9 +211,11 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
       )
       io.result(idx).bits.attribute := vcEntry.attribute
       io.result(idx).bits.taken := vcEntry.counter.isPositive
+      io.alwaysTaken(idx) := info.hit && vcEntry.attribute.isConditional && vcEntry.alwaysTaken
     }
   } else {
-    io.result := s2_rawPredictions
+    io.result      := s2_rawPredictions
+    io.alwaysTaken := s2_rawAlwaysTaken
   }
 
   // VC meta output
@@ -229,6 +236,7 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
       vcSlotMetas(s).position := Cat(info.posHigherBits, vcEntry.position)
       vcSlotMetas(s).attribute := vcEntry.attribute
       vcSlotMetas(s).counter := vcEntry.counter
+      vcSlotMetas(s).alwaysTaken := vcEntry.alwaysTaken
       vcSlotMetas(s).sramValid.foreach(_ := false.B)
       vcSlotMetas(s).sramTag.foreach(_ := 0.U)
       vcSlotMetas(s).targetLowerBits.foreach(_ := vcEntry.targetLowerBits)
@@ -345,17 +353,22 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     t1_vcUpdateEntry.targetLowerBits := getTargetLowerBits(t1_mispredictInfo.bits.target)
     t1_vcUpdateEntry.targetCarry := getTargetCarry(t1_activeStartPc, t1_mispredictInfo.bits.target)
     t1_vcUpdateEntry.attribute := t1_mispredictInfo.bits.attribute
-    // Counter preservation: update if conditional, reset if attribute changed or needIttage
+    // Direction state: reset if attribute changed or needIttage, else the same always-taken/counter rule as SRAM
     val t1_vcAttrChanged = !(t1_mispredictInfo.bits.attribute === t1_vcEntry.attribute)
     val t1_vcNeedReset = t1_vcAttrChanged || t1_mispredictInfo.bits.attribute.needIttage
+    val t1_vcIsCond = t1_mispredictInfo.bits.attribute.isConditional
+    val t1_vcTaken = t1_mispredictInfo.bits.taken
+    val t1_vcNextAlwaysTaken = t1_vcEntry.alwaysTaken && t1_vcTaken
+    val t1_vcUpdatedCounter = Mux(t1_vcNextAlwaysTaken, t1_vcEntry.counter, t1_vcEntry.counter.getUpdate(t1_vcTaken))
+    t1_vcUpdateEntry.alwaysTaken := Mux(
+      t1_vcNeedReset,
+      t1_vcIsCond && t1_vcTaken,
+      Mux(t1_vcIsCond, t1_vcNextAlwaysTaken, t1_vcEntry.alwaysTaken)
+    )
     t1_vcUpdateEntry.counter := Mux(
       t1_vcNeedReset,
       TakenCounter.WeakPositive,
-      Mux(
-        t1_mispredictInfo.bits.attribute.isConditional,
-        t1_vcEntry.counter.getUpdate(t1_mispredictInfo.bits.taken),
-        t1_vcEntry.counter
-      )
+      Mux(t1_vcIsCond, t1_vcUpdatedCounter, t1_vcEntry.counter)
     )
     vcModule.io.update.valid := t1_doUpdateVc
     vcModule.io.update.bits.idx := t1_activeVcMeta.vcIdx
@@ -377,6 +390,7 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     t1_evictedVcEntry.targetCarry := t1_evictedMeta.targetCarry.get
     t1_evictedVcEntry.targetLowerBits := t1_evictedMeta.targetLowerBits.get
     t1_evictedVcEntry.counter := t1_evictedMeta.counter
+    t1_evictedVcEntry.alwaysTaken := t1_evictedMeta.alwaysTaken
 
     vcModule.io.insert.valid := t1_doInsertVc && t1_evictedMeta.sramValid.get
     vcModule.io.insert.bits.entry := t1_evictedVcEntry
