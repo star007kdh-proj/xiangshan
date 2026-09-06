@@ -72,8 +72,8 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
     }
     val invalidate: Valid[InvalidateReq] = Flipped(Valid(new InvalidateReq))
 
-    // S3 PLRU prediction touches (one per VC result slot)
-    val predTouch: Vec[Valid[UInt]] = Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W))))
+    // T1 PLRU training touches for actually-taken VC slots (one per VC result slot)
+    val takenTouch: Vec[Valid[UInt]] = Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W))))
 
     // Predecode-triggered VC entry invalidation (ghost entry removal)
     val pdInvalidate: Valid[InvalidateReq] = Flipped(Valid(new InvalidateReq))
@@ -87,7 +87,7 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
   /* *** replacer *** */
   private val replacer = Module(new MainBtbVCReplacer)
   replacer.io.validBits := VecInit(entries.map(_.valid)).asUInt
-  replacer.io.predTouch := io.predTouch
+  replacer.io.takenTouch := io.takenTouch
 
   /* *** combinational lookup (driven at S1) — top-2 hits *** */
   io.lookup.foreach { bank =>

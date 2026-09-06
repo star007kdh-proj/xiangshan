@@ -232,12 +232,6 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   // used for check abtb output
   io.debug_startPc := s2_startPc
 
-  replacers.zipWithIndex.foreach { case (r, i) =>
-    r.io.readValid   := s2_valid && s2_hit && s2_bankMask(i)
-    r.io.readSetIdx  := s2_setIdx
-    r.io.readWayMask := s2_hitMask
-  }
-
   /* --------------------------------------------------------------------------------------------------------------
      train pipeline stage 0
      - receive train request
@@ -351,6 +345,12 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     r.io.writeValid  := b.io.writeResp.valid
     r.io.writeSetIdx := b.io.writeResp.bits.setIdx
     r.io.writeWayIdx := b.io.writeResp.bits.wayIdx
+  }
+  // training touch on the way that was actually taken; allocation touch arrives later through writeResp
+  replacers.zipWithIndex.foreach { case (r, i) =>
+    r.io.readValid   := t1_fire && t1_trainTaken && t1_bankMask(i) && t1_hit
+    r.io.readSetIdx  := t1_setIdx
+    r.io.readWayMask := VecInit(t1_hitMask)
   }
 
   /* --------------------------------------------------------------------------------------------------------------

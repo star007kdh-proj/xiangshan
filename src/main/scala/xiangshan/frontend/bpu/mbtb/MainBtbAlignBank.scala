@@ -197,16 +197,8 @@ class MainBtbAlignBank(
   dontTouch(s2_hitMask)
 
   /* *** s3 ***
-   * touch replacer using final takenMask (mbtb + tage + sc)
+   * nothing to do: the replacer is touched at T1 by actual outcome, not by the S3 prediction
    */
-  private val s3_fire           = io.stageCtrl.s3_fire
-  private val s3_replacerSetIdx = RegEnable(getReplacerSetIndex(s2_startPc), s2_fire)
-  private val s3_takenMask      = io.s3_takenMask
-
-  // touch taken entries only: not-taken conditional entries are considered not very useful and should be killed first
-  replacer.io.predictTouch.valid        := s3_fire && s3_takenMask.reduce(_ || _)
-  replacer.io.predictTouch.bits.setIdx  := s3_replacerSetIdx
-  replacer.io.predictTouch.bits.wayMask := s3_takenMask.asUInt
 
   /* *** t1 ***
    * send write req to internal banks (srams)
@@ -260,10 +252,18 @@ class MainBtbAlignBank(
     b.io.writeEntry.req.bits.entry   := t1_entry
   }
 
-  // update replacer
-  replacer.io.trainTouch.valid        := t1_fire && t1_entryNeedWrite
+  // training touch: the first way whose branch was actually taken; allocation touch takes priority
+  private val t1_actualTakenMask = VecInit(t1_meta.map { meta =>
+    t1_branches.map { branch =>
+      branch.valid && branch.bits.taken && meta.rawHit && meta.position === branch.bits.cfiPosition
+    }.reduce(_ || _)
+  })
+  private val t1_actualTakenOH = PriorityEncoderOH(t1_actualTakenMask.asUInt)
+
+  // update replacer: allocation touch and training touch are co-timed and share the same interface
+  replacer.io.trainTouch.valid        := t1_fire && (t1_entryNeedWrite || t1_actualTakenMask.reduce(_ || _))
   replacer.io.trainTouch.bits.setIdx  := getReplacerSetIndex(t1_startPc)
-  replacer.io.trainTouch.bits.wayMask := t1_entryWayMask
+  replacer.io.trainTouch.bits.wayMask := Mux(t1_entryNeedWrite, t1_entryWayMask, t1_actualTakenOH)
 
   // VC Path C: expose the replacer's victim way mask for eviction capture
   io.replacerVictimWayMask.foreach(_ := replacer.io.victim.wayMask)
@@ -328,4 +328,5 @@ class MainBtbAlignBank(
   )
 
   XSPerfAccumulate("updateCounter", Mux(t1_fire, PopCount(t1_counterWayMask), 0.U))
+  XSPerfAccumulate("replacerTakenTouch", t1_fire && !t1_entryNeedWrite && t1_actualTakenMask.reduce(_ || _))
 }

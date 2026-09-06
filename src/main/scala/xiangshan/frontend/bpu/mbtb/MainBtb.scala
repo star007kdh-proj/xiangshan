@@ -237,22 +237,12 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   }
 
   /* *** s3 ***
-   * touch replacer using final takenMask (mbtb + tage + sc)
+   * nothing to do: SRAM and VC replacers are touched at T1 by actual outcome, not by the S3 prediction
    */
   s3_fire := io.enable && io.stageCtrl.s3_fire
   // io.result is flattened, so is s3_takenMask from Bpu top, here we need to slice it back to alignBank structure
   alignBanks.zipWithIndex.foreach { case (b, i) =>
     b.io.s3_takenMask := io.s3_takenMask.slice(i * NumWay, (i + 1) * NumWay)
-  }
-
-  // VC S3 PLRU predTouch: touch taken VC entries
-  vc.foreach { vcModule =>
-    val s3_vcSlotInfos = RegEnable(s2_vcSlotInfos_opt.get, s2_fire)
-    for (s <- 0 until NumVCResultSlots) {
-      val vcTaken = io.s3_takenMask(NumWay * NumAlignBanks + s)
-      vcModule.io.predTouch(s).valid := s3_fire && s3_vcSlotInfos(s).hit && vcTaken
-      vcModule.io.predTouch(s).bits := s3_vcSlotInfos(s).vcIdx
-    }
   }
 
   /* *** t0 ***
@@ -304,16 +294,29 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
       vcModule.io.t1Read(s).idx := t1_vcMetas(s).vcIdx
     }
 
-    // Check each VC slot for misprediction match
-    val t1_vcSlotHits = VecInit((0 until NumVCResultSlots).map { s =>
+    // Per slot: the VC entry read by vcIdx still belongs to this fetch block (not replaced since prediction)
+    val t1_vcSlotLive = VecInit((0 until NumVCResultSlots).map { s =>
       val vcEntry = vcModule.io.t1Read(s).entry
       // Reconstruct expected vcTag from the entry's source AB
       val entryABIdx = vcEntry.vcTag(AlignBankIdxLen - 1, 0)
       val expectedVcTag = makeVCTag(Mux1H(UIntToOH(entryABIdx, NumAlignBanks), t1_startPcVec))
-      t1_vcMetas(s).hit && vcEntry.valid &&
-        vcEntry.vcTag === expectedVcTag &&
-        vcEntry.position === t1_mispredictAlignedPos
+      t1_vcMetas(s).hit && vcEntry.valid && vcEntry.vcTag === expectedVcTag
     })
+
+    // Check each VC slot for misprediction match
+    val t1_vcSlotHits = VecInit((0 until NumVCResultSlots).map { s =>
+      t1_vcSlotLive(s) && vcModule.io.t1Read(s).entry.position === t1_mispredictAlignedPos
+    })
+
+    // Training touch: VC slots whose branch was actually taken (replaces the S3 prediction touch)
+    val t1_vcSlotMetas = t1_meta.vcSlotMetas.get
+    for (s <- 0 until NumVCResultSlots) {
+      val actualTaken = t1_train.branches.map { branch =>
+        branch.valid && branch.bits.taken && branch.bits.cfiPosition === t1_vcSlotMetas(s).position
+      }.reduce(_ || _)
+      vcModule.io.takenTouch(s).valid := t1_fire && t1_vcSlotLive(s) && actualTaken
+      vcModule.io.takenTouch(s).bits  := t1_vcMetas(s).vcIdx
+    }
     val t1_vcHitFromReg = t1_vcSlotHits.asUInt.orR
     val t1_vcHitSlotIdx = PriorityEncoder(t1_vcSlotHits.asUInt)
     val t1_vcEntry = vcModule.io.t1Read(t1_vcHitSlotIdx).entry

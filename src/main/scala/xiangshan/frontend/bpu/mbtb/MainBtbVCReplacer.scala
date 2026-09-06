@@ -24,9 +24,9 @@ class MainBtbVCReplacer(implicit p: Parameters) extends MainBtbModule {
   require(HasVC, "MainBtbVCReplacer instantiated without VC enabled")
 
   class MainBtbVCReplacerIO extends Bundle {
-    // S3 prediction touches — one per VC result slot (chained first)
-    val predTouch: Vec[Valid[UInt]] = Vec(NumVCResultSlots, Flipped(Valid(UInt(log2Ceil(VCSize).W))))
-    // T1 training touch — single (chained after predTouch)
+    // T1 actual-taken touches — one per VC result slot (chained first)
+    val takenTouch: Vec[Valid[UInt]] = Vec(NumVCResultSlots, Flipped(Valid(UInt(log2Ceil(VCSize).W))))
+    // T1 allocation/update touch — single (chained after takenTouch)
     val trainTouch: Valid[UInt] = Flipped(Valid(UInt(log2Ceil(VCSize).W)))
     // Valid bits from the VC register file, for invalid-first priority
     val validBits: UInt = Input(UInt(VCSize.W))
@@ -39,14 +39,14 @@ class MainBtbVCReplacer(implicit p: Parameters) extends MainBtbModule {
   // Single PLRU state register (fully-associative, one set)
   private val plruState = RegInit(0.U((VCSize - 1).W))
 
-  // Phase 1: predict touches (up to NumAlignBanks simultaneous)
+  // Phase 1: actual-taken touches (up to NumVCResultSlots simultaneous)
   private val predStateGen = Module(new PlruStateGen(VCSize, AccessSize = NumVCResultSlots))
   predStateGen.io.state   := plruState
-  predStateGen.io.touches := io.predTouch
-  private val anyPredTouch  = io.predTouch.map(_.valid).reduce(_ || _)
+  predStateGen.io.touches := io.takenTouch
+  private val anyPredTouch  = io.takenTouch.map(_.valid).reduce(_ || _)
   private val afterPredState = Mux(anyPredTouch, predStateGen.io.nextState, plruState)
 
-  // Phase 2: train touch (chained after predict)
+  // Phase 2: allocation/update touch (chained after taken touch)
   private val trainStateGen = Module(new PlruStateGen(VCSize, AccessSize = 1))
   trainStateGen.io.state      := afterPredState
   trainStateGen.io.touches(0) := io.trainTouch
@@ -58,6 +58,6 @@ class MainBtbVCReplacer(implicit p: Parameters) extends MainBtbModule {
   // Victim selection: invalid-first, then PLRU
   private val hasInvalid = !io.validBits.andR
   private val invalidIdx = PriorityEncoder(~io.validBits)
-  // PLRU victim is computed from afterPredState (state after predict touch, before train touch)
+  // PLRU victim is computed from afterPredState (state after taken touch, before train touch)
   io.victim := Mux(hasInvalid, invalidIdx, trainStateGen.io.victim)
 }

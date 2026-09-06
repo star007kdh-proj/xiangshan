@@ -21,6 +21,7 @@ import org.chipsalliance.cde.config.Parameters
 import xiangshan.frontend.bpu.replacer.ReplacerState
 import xiangshan.frontend.bpu.replacer.ReplacerStateGen
 
+// Training-touch replacer: the state is touched only at T1 (allocation or actual-taken hit), never at prediction
 class MainBtbReplacer(implicit p: Parameters) extends MainBtbModule {
   class MainBtbReplacerIO extends Bundle {
     class Touch extends Bundle {
@@ -32,41 +33,20 @@ class MainBtbReplacer(implicit p: Parameters) extends MainBtbModule {
       val wayMask: UInt = UInt(NumWay.W)
     }
 
-    val victim: Victim            = Output(new Victim)
-    val touch:  Vec[Valid[Touch]] = Vec(2, Flipped(Valid(new Touch))) // magic number 2: predict and train
-
-    def predictTouch: Valid[Touch] = touch(0)
-    def trainTouch:   Valid[Touch] = touch(1)
+    val victim:     Victim       = Output(new Victim)
+    val trainTouch: Valid[Touch] = Flipped(Valid(new Touch))
   }
 
   val io: MainBtbReplacerIO = IO(new MainBtbReplacerIO)
 
-  private val predictStateGen = Module(ReplacerStateGen(Replacer, NumWay, accessSize = NumWay))
-  private val trainStateGen   = Module(ReplacerStateGen(Replacer, NumWay, accessSize = 1))
-  private val stateBank       = Module(new ReplacerState(NumSets, predictStateGen.StateWidth))
+  private val trainStateGen = Module(ReplacerStateGen(Replacer, NumWay, accessSize = 1))
+  private val stateBank     = Module(new ReplacerState(NumSets, trainStateGen.StateWidth))
 
-  /* *** predict *** */
-  // read current state
-  stateBank.io.predictReadSetIdx := io.predictTouch.bits.setIdx
-  private val predictState = stateBank.io.predictReadState
-
-  // compose touch way vec
-  private val predictTouchWay = VecInit((0 until NumWay).map { i =>
-    val wayValid = Wire(Valid(UInt(log2Up(NumWay).W)))
-    wayValid.valid := io.predictTouch.valid && io.predictTouch.bits.wayMask(i)
-    wayValid.bits  := i.U
-    wayValid
-  })
-
-  // generate next state
-  predictStateGen.io.state   := predictState
-  predictStateGen.io.touches := predictTouchWay
-  private val predictNextState = Mux(io.predictTouch.valid, predictStateGen.io.nextState, predictState)
-
-  // write back next state
-  stateBank.io.predictWriteValid  := io.predictTouch.valid
-  stateBank.io.predictWriteSetIdx := io.predictTouch.bits.setIdx
-  stateBank.io.predictWriteState  := predictNextState
+  // shared state bank, prediction-side ports unused here
+  stateBank.io.predictReadSetIdx  := 0.U
+  stateBank.io.predictWriteValid  := false.B
+  stateBank.io.predictWriteSetIdx := 0.U
+  stateBank.io.predictWriteState  := 0.U
 
   /* *** train *** */
   // read current state
@@ -79,7 +59,7 @@ class MainBtbReplacer(implicit p: Parameters) extends MainBtbModule {
   trainTouchWay.bits  := OHToUInt(io.trainTouch.bits.wayMask) // MainBtbAlignBank ensures this is one-hot
   assert(
     !io.trainTouch.valid || PopCount(io.trainTouch.bits.wayMask) <= 1.U,
-    "victim wayMask should be at-most-one-hot"
+    "train touch wayMask should be at-most-one-hot"
   )
 
   // generate next state
