@@ -51,6 +51,9 @@ case class BpuParameters(
     PairPrefetchHungryDist: Int = 0,
     // mBTB always-taken bit forces the S3 direction of a conditional branch to taken, bypassing TAGE/SC (gem5 parity)
     AlwaysTakenOverridesS3: Boolean = true,
+    // A conditional branch in pair slot B is learned and emitted only while mBTB marks it always-taken (gem5 G6/C6).
+    // When false, a conditional slot B without the bit is still allowed but must reach PairCondConfThreshold.
+    PairCondSlotRequiresAlwaysTaken: Boolean = true,
     // history
     phrParameters:      PhrParameters = PhrParameters(),
     commonHRParameters: CommonHRParameters = CommonHRParameters(),
@@ -79,6 +82,7 @@ trait HasBpuParameters extends HasFrontendParameters {
   def PairConfMax:             Int = (1 << PairConfWidth) - 1
 
   def AlwaysTakenOverridesS3: Boolean = bpuParameters.AlwaysTakenOverridesS3
+  def PairCondSlotRequiresAlwaysTaken: Boolean = bpuParameters.PairCondSlotRequiresAlwaysTaken
 
   // general
   def FetchBlockSizeWidth:    Int = log2Ceil(FetchBlockSize)

@@ -134,6 +134,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     pairOut.bits.isPair       := s1_isPair
     pairOut.bits.first        := io.prediction.bits
     pairOut.bits.confidence   := s1_hitEntry.slot2.confidence.getOrElse(0.U)
+    pairOut.bits.secondAlwaysTaken := s1_hitEntry.slot2.alwaysTaken.getOrElse(false.B)
     pairOut.bits.second.taken := true.B // pair is always (taken, taken)
     pairOut.bits.second.cfiPosition := s1_hitEntry.slot2.position
     pairOut.bits.second.attribute   := s1_hitEntry.slot2.attribute
@@ -245,6 +246,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       t1_updatedEntry.slot2.valid := false.B
       t1_updatedEntry.isPair.foreach(_ := false.B)
       t1_updatedEntry.slot2.confidence.foreach(_ := 0.U)
+      t1_updatedEntry.slot2.alwaysTaken.foreach(_ := false.B)
     }.otherwise {
       t1_updatedEntry.usefulCnt := t1_hitEntry.usefulCnt.getDecrease()
     }
@@ -334,20 +336,29 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   // cur (slot B candidate) classification
   private val t0_pairBase = t0_pairSeq && t0_slotAOk && t0_promoteEntryHit && t0_entryConsistent
-  // fastTrainKill: B not-taken, return, call, or indirect -> invalidate slot2
+  // a taken conditional B that mBTB does not mark always-taken: ineligible when the slot requires the bit (gem5 C6)
+  private val t0_pairSecondCondNotAlwaysTaken =
+    if (EnableTwoTaken) {
+      val cur_pred = io.fastTrain.get.bits.branch
+      PairCondSlotRequiresAlwaysTaken.B && cur_pred.taken && cur_pred.attribute.isConditional &&
+        !io.fastTrain.get.bits.alwaysTaken
+    } else false.B
+  // fastTrainKill: B not-taken, return, call, indirect, or non-always-taken conditional -> invalidate slot2
   private val t0_fastTrainKill =
     if (EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.branch
       val cur_attr = cur_pred.attribute
-      t0_pairBase && (!cur_pred.taken || cur_attr.hasPop || cur_attr.hasPush || cur_attr.isIndirect)
+      t0_pairBase && (
+        !cur_pred.taken || cur_attr.hasPop || cur_attr.hasPush || cur_attr.isIndirect || t0_pairSecondCondNotAlwaysTaken
+      )
     } else false.B
-  // eligible: B is direct-jmp or always-taken-proxy conditional -> alloc/confirm/kill
+  // eligible: B is direct-jmp or a conditional that passes the always-taken rule -> alloc/confirm/kill
   private val t0_pairEligible =
     if (EnableTwoTaken) {
       val cur_pred = io.fastTrain.get.bits.branch
       val cur_attr = cur_pred.attribute
       t0_pairBase && cur_pred.taken && !cur_attr.hasPop && !cur_attr.hasPush && !cur_attr.isIndirect &&
-        (cur_attr.isDirect || cur_attr.isConditional)
+        (cur_attr.isDirect || cur_attr.isConditional) && !t0_pairSecondCondNotAlwaysTaken
     } else false.B
 
   // latch eligible-promotion data into t1
@@ -367,6 +378,9 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     if (EnableTwoTaken && EnableTargetFix)
       Some(RegEnable(getTargetCarry(io.fastTrain.get.bits.startPc, io.fastTrain.get.bits.branch.target),
         t0_pairEligible)) else None
+  // mBTB always-taken bit of B, refreshed on every alloc/confirm so a cleared bit reaches the emit gate at once
+  private val t1_promoteSlot2AlwaysTaken =
+    if (EnableTwoTaken) RegEnable(io.fastTrain.get.bits.alwaysTaken, t0_pairEligible) else false.B
 
   // latch kill data into t1
   private val t1_fastTrainKill    = RegNext(t0_fastTrainKill, init = false.B)
@@ -419,6 +433,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
         entries(t1_promoteIdx).slot2.taken := true.B
         writeSlot2Content(t1_promoteIdx)
         entries(t1_promoteIdx).slot2.confidence.foreach(_ := 1.U)
+        entries(t1_promoteIdx).slot2.alwaysTaken.foreach(_ := t1_promoteSlot2AlwaysTaken)
       }.elsewhen(sameBR2) {
         // PairConfirm: content matches -> saturating increment, keep slot2
         entries(t1_promoteIdx).slot2.valid := true.B
@@ -426,6 +441,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
         entries(t1_promoteIdx).slot2.confidence.foreach { c =>
           c := Mux(curConf === PairConfMax.U, curConf, curConf + 1.U)
         }
+        entries(t1_promoteIdx).slot2.alwaysTaken.foreach(_ := t1_promoteSlot2AlwaysTaken)
       }.otherwise {
         // PairKill: any content mismatch proves the pair unstable -> invalidate now;
         // a later clean pass re-allocs the new content (confidence counts consecutive
@@ -465,6 +481,13 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     }
     XSPerfAccumulate("pairSecondMispHit",  t1_mispKillHit)
     XSPerfAccumulate("pairSecondMispMiss", t1_mispKillReq.valid && !t1_mispKillHitOH.orR)
+    // split the killed pair by slot B kind: always-taken conditional / other conditional / jump
+    val t1_mispKillSlot2 = entries(t1_mispKillIdx).slot2
+    XSPerfAccumulate("pairSecondMispCondAlwaysTaken",
+      t1_mispKillHit && t1_mispKillSlot2.attribute.isConditional && t1_mispKillSlot2.alwaysTaken.get)
+    XSPerfAccumulate("pairSecondMispCondNotAlwaysTaken",
+      t1_mispKillHit && t1_mispKillSlot2.attribute.isConditional && !t1_mispKillSlot2.alwaysTaken.get)
+    XSPerfAccumulate("pairSecondMispJump", t1_mispKillHit && !t1_mispKillSlot2.attribute.isConditional)
   }
 
   // update replacer
@@ -502,16 +525,20 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   if (EnableTwoTaken) {
     val s1_pairValid = io.pairPrediction.get.valid
     XSPerfAccumulate("pairLookupHit", s1_pairValid && s1_fire)
+    // same threshold rule as the BPU emit gate: only a non-always-taken conditional B needs the higher threshold
+    val s1_pairOut = io.pairPrediction.get.bits
     XSPerfAccumulate(
       "pairLookupHitAtThreshold",
       s1_pairValid && s1_fire &&
-        (io.pairPrediction.get.bits.confidence >=
+        (s1_pairOut.confidence >=
           Mux(
-            io.pairPrediction.get.bits.second.attribute.isConditional,
+            s1_pairOut.second.attribute.isConditional && !s1_pairOut.secondAlwaysTaken,
             PairCondConfThreshold.U,
             PairDirectConfThreshold.U
           ))
     )
+    XSPerfAccumulate("pairLookupHitCondAlwaysTaken",
+      s1_pairValid && s1_fire && s1_pairOut.second.attribute.isConditional && s1_pairOut.secondAlwaysTaken)
 
     // chain detection + classification (fastTrain dependent)
     locally {
@@ -537,7 +564,12 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
         t0_fastTrainKill && cur_taken && !cur_attr.hasPop && cur_attr.hasPush)
       XSPerfAccumulate("pairFastTrainKillIndirect",
         t0_fastTrainKill && cur_taken && !cur_attr.hasPop && !cur_attr.hasPush && cur_attr.isIndirect)
+      XSPerfAccumulate("pairKillCondNotAlwaysTaken", t0_fastTrainKill && t0_pairSecondCondNotAlwaysTaken)
       XSPerfAccumulate("pairEligible", t0_pairEligible)
+      XSPerfAccumulate("pairEligibleCondAlwaysTaken",
+        t0_pairEligible && cur_attr.isConditional && io.fastTrain.get.bits.alwaysTaken)
+      XSPerfAccumulate("pairEligibleCondNotAlwaysTaken",
+        t0_pairEligible && cur_attr.isConditional && !io.fastTrain.get.bits.alwaysTaken)
     }
 
     // write-back outcomes

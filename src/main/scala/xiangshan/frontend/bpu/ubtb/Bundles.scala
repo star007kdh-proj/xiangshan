@@ -60,6 +60,8 @@ class MicroBtbEntry(implicit p: Parameters) extends MicroBtbBundle {
     val taken: Bool = Bool()
     // pair confidence (2-bit saturating). Bumped on chain re-confirm, reset on re-alloc.
     val confidence: Option[UInt] = if (EnableTwoTaken) Option(UInt(PairConfWidth.W)) else None
+    // mBTB always-taken bit of the slot 2 branch, copied from fastTrain at alloc/confirm (gem5 pairBranch.alwaysTaken)
+    val alwaysTaken: Option[Bool] = if (EnableTwoTaken) Option(Bool()) else None
   }
 
   // we consider an entry is valid if it has usefulCnt > 0
@@ -107,4 +109,7 @@ class MicroBtbPairOut(implicit p: Parameters) extends MicroBtbBundle {
 
   /** Pair confidence (saturating); BPU emit gate uses an attribute-dependent threshold. */
   val confidence: UInt = UInt(PairConfWidth.W)
+
+  /** Whether the second branch is an mBTB always-taken conditional (gem5 G6 gate input). */
+  val secondAlwaysTaken: Bool = Bool()
 }

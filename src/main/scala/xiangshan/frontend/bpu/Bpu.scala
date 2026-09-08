@@ -350,16 +350,24 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     if (!EnableTwoTaken || PairPrefetchHungryDist == 0) true.B
     else io.fromFtq.unprefetchedBlockNum.get < PairPrefetchHungryDist.U
 
-  // conditional slot B requires a higher confidence threshold than direct.
+  // conditional slot B (gem5 G6): an mBTB always-taken conditional is emitted with the direct-jump threshold;
+  // a conditional without the bit is refused when PairCondSlotRequiresAlwaysTaken, else needs PairCondConfThreshold
+  private val s1_pairSecondCond        = if (EnableTwoTaken) s1_ubtbPair.bits.second.attribute.isConditional else false.B
+  private val s1_pairSecondAlwaysTaken = if (EnableTwoTaken) s1_ubtbPair.bits.secondAlwaysTaken else false.B
+  private val s1_pairSecondCondAllowed =
+    if (!EnableTwoTaken) false.B
+    else if (PairCondSlotRequiresAlwaysTaken) !s1_pairSecondCond || s1_pairSecondAlwaysTaken
+    else true.B
   private val s1_pairConfThreshold = if (EnableTwoTaken)
-    Mux(s1_ubtbPair.bits.second.attribute.isConditional, PairCondConfThreshold.U, PairDirectConfThreshold.U)
+    Mux(s1_pairSecondCond && !s1_pairSecondAlwaysTaken, PairCondConfThreshold.U, PairDirectConfThreshold.U)
     else 0.U
 
   private val s1_usePair = if (EnableTwoTaken)
     (!s1_abtbValidEffective || abtbUbtbAgree) &&
       s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
       s1_pairFetchHungry &&
-      // confidence emit gate (attribute-dependent threshold)
+      // confidence emit gate (attribute-dependent threshold) and the conditional slot B rule
+      s1_pairSecondCondAllowed &&
       (s1_ubtbPair.bits.confidence >= s1_pairConfThreshold) &&
       s1_ubtbPair.bits.first.taken &&
       // slot A: cond / direct-jmp / direct-call; reject return + indirect
@@ -818,6 +826,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
     // slot-A-call pair fires; second-slot meta carries the post-push RAS view.
     XSPerfAccumulate("pairFireCallA", s1_pairFire && s1_ubtbPair.bits.first.attribute.hasPush)
+    // slot B kind at fire: always-taken conditional / other conditional / jump
+    XSPerfAccumulate("pairFireCondAlwaysTaken", s1_pairFire && s1_pairSecondCond && s1_pairSecondAlwaysTaken)
+    XSPerfAccumulate("pairFireCondNotAlwaysTaken", s1_pairFire && s1_pairSecondCond && !s1_pairSecondAlwaysTaken)
+    XSPerfAccumulate("pairFireJump", s1_pairFire && !s1_pairSecondCond)
+    XSPerfAccumulate("pairBlockedCondNotAlwaysTaken",
+      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && !s1_pairSecondCondAllowed)
   }
   XSPerfHistogram(
     "fetchBlockSize",
