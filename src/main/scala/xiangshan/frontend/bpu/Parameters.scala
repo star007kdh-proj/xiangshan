@@ -49,6 +49,8 @@ case class BpuParameters(
     // Pair fires only when fewer than this many blocks are un-prefetched
     // (prefetch caught up -> downstream hungry). 0 = gate off.
     PairPrefetchHungryDist: Int = 0,
+    // mBTB always-taken bit forces the S3 direction of a conditional branch to taken, bypassing TAGE/SC (gem5 parity)
+    AlwaysTakenOverridesS3: Boolean = true,
     // history
     phrParameters:      PhrParameters = PhrParameters(),
     commonHRParameters: CommonHRParameters = CommonHRParameters(),
@@ -75,6 +77,8 @@ trait HasBpuParameters extends HasFrontendParameters {
   def PairCondConfThreshold:   Int = bpuParameters.PairCondConfThreshold
   def PairPrefetchHungryDist:  Int = bpuParameters.PairPrefetchHungryDist
   def PairConfMax:             Int = (1 << PairConfWidth) - 1
+
+  def AlwaysTakenOverridesS3: Boolean = bpuParameters.AlwaysTakenOverridesS3
 
   // general
   def FetchBlockSizeWidth:    Int = log2Ceil(FetchBlockSize)

@@ -352,6 +352,13 @@ class MainBtbAlignBank(
   XSPerfAccumulate("updateCounter", Mux(t1_fire, PopCount(t1_counterWayMask), 0.U))
   XSPerfAccumulate("alwaysTakenSet", Mux(t1_fire, PopCount(t1_alwaysTakenSetMask), 0.U))
   XSPerfAccumulate("alwaysTakenClear", Mux(t1_fire, PopCount(t1_alwaysTakenClearMask), 0.U))
+  // the clearing not-taken was itself the mispredicted branch (expected whenever the bit forces S3 taken)
+  XSPerfAccumulate(
+    "alwaysTakenClearOnMispredict",
+    t1_fire && t1_mispredictInfo.valid && t1_alwaysTakenClearMask.zip(t1_meta).map { case (clr, meta) =>
+      clr && meta.position === t1_mispredictInfo.bits.cfiPosition
+    }.reduce(_ || _)
+  )
   XSPerfAccumulate("predAlwaysTakenHit", Mux(s2_fire, PopCount(r.resp.alwaysTaken), 0.U))
   XSPerfAccumulate("replacerTakenTouch", t1_fire && !t1_entryNeedWrite && t1_actualTakenMask.reduce(_ || _))
 }

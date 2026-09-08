@@ -135,6 +135,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s1_prediction = Wire(new Prediction)
   private val s3_prediction = Wire(new Prediction)
+  // always-taken bit of the S3 first taken branch (conditional only), assigned in the s3 selection below
+  private val s3_firstTakenAlwaysTaken = Wire(Bool())
 
   private val debug_bpId = RegInit(0.U(XLEN.W))
 
@@ -185,8 +187,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   fastTrain.valid        := s3_valid
   fastTrain.bits.startPc := s3_startPc
   fastTrain.bits.branch.fromPrediction(s3_prediction, s3_override)
-  fastTrain.bits.abtbMeta  := s3_abtbMeta
-  fastTrain.bits.utageMeta := s3_utageMeta
+  fastTrain.bits.abtbMeta    := s3_abtbMeta
+  fastTrain.bits.utageMeta   := s3_utageMeta
+  fastTrain.bits.alwaysTaken := s3_firstTakenAlwaysTaken
 
   predictors.foreach { p =>
     // TODO: duplicate pc and fire to solve high fan-out issue
@@ -389,23 +392,31 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_scUsed      = RegEnable(sc.io.scUsed, s2_fire)
   private val s3_scTakenMask = RegEnable(sc.io.scTakenMask, s2_fire)
 
-  private val s3_takenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
+  private val s3_alwaysTakenMask = RegEnable(mbtb.io.alwaysTaken, s2_fire)
+
+  // direction of each conditional slot as the S3 predictors see it (SC > TAGE provider > TAGE alt > base table)
+  private val s3_predTakenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
     val tagePred = s3_tagePrediction(i)
     val useSc    = s3_scUsed(i)
     val scTaken  = s3_scTakenMask(i)
 
+    MuxCase(
+      entry.bits.taken, // default: base table
+      Seq(
+        useSc                -> scTaken,
+        tagePred.useProvider -> tagePred.providerPred,
+        tagePred.hasAlt      -> tagePred.altPred
+      )
+    )
+  })
+  // the mBTB always-taken bit forces taken ahead of the predictors (gem5: pred.taken || alwaysTaken)
+  private val s3_alwaysTakenForce = VecInit(s3_alwaysTakenMask.map(_ && AlwaysTakenOverridesS3.B))
+
+  private val s3_takenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
     entry.valid && (
       entry.bits.attribute.isDirect ||
         entry.bits.attribute.isIndirect ||
-        entry.bits.attribute.isConditional &&
-        MuxCase(
-          entry.bits.taken, // default: base table
-          Seq(
-            useSc                -> scTaken,
-            tagePred.useProvider -> tagePred.providerPred,
-            tagePred.hasAlt      -> tagePred.altPred
-          )
-        )
+        entry.bits.attribute.isConditional && (s3_alwaysTakenForce(i) || s3_predTakenMask(i))
     )
   })
   private val s3_taken = s3_takenMask.reduce(_ || _)
@@ -413,6 +424,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_compareMatrix      = CompareMatrix(VecInit(s3_mbtbResult.map(_.bits.cfiPosition)))
   private val s3_firstTakenBranchOH = s3_compareMatrix.getLeastElementOH(s3_takenMask)
   private val s3_firstTakenBranch   = Mux1H(s3_firstTakenBranchOH, s3_mbtbResult)
+  s3_firstTakenAlwaysTaken :=
+    s3_taken && s3_firstTakenBranch.bits.attribute.isConditional && Mux1H(s3_firstTakenBranchOH, s3_alwaysTakenMask)
   private val s3_useRas             = s3_firstTakenBranch.bits.attribute.isReturn
   private val s3_useIttage          = s3_firstTakenBranch.bits.attribute.needIttage && ittage.io.prediction.hit
 
@@ -667,6 +680,20 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   }
 
   /* *** Debug Meta *** */
+  // always-taken bit vs the S3 predictors, per conditional slot
+  private val perf_s3CondAlwaysTaken = VecInit(s3_mbtbResult.zip(s3_alwaysTakenMask).map {
+    case (entry, alwaysTaken) => entry.valid && entry.bits.attribute.isConditional && alwaysTaken
+  })
+  private val perf_s3AlwaysTakenOverride = perf_s3CondAlwaysTaken.zip(s3_predTakenMask).map {
+    case (alwaysTaken, predTaken) => alwaysTaken && !predTaken
+  }
+  private val perf_s3AlwaysTakenAgree = perf_s3CondAlwaysTaken.zip(s3_predTakenMask).map {
+    case (alwaysTaken, predTaken) => alwaysTaken && predTaken
+  }
+  XSPerfAccumulate("s3_alwaysTaken_override", Mux(s3_fire, PopCount(perf_s3AlwaysTakenOverride), 0.U))
+  XSPerfAccumulate("s3_alwaysTaken_agree", Mux(s3_fire, PopCount(perf_s3AlwaysTakenAgree), 0.U))
+  XSPerfAccumulate("s3_firstTaken_alwaysTaken", s3_fire && s3_firstTakenAlwaysTaken)
+
   // used for performance counters
   private val s3_firstTakenBlameSc = Mux1H(s3_firstTakenBranchOH, s3_scUsed)
   // see class BpuPredictionSource in bpu/Bundles.scala

@@ -292,6 +292,8 @@ class BpuFastTrain(implicit p: Parameters) extends BpuBundle {
   val branch:    BranchInfo    = new BranchInfo
   val abtbMeta:  AheadBtbMeta  = new AheadBtbMeta
   val utageMeta: MicroTageMeta = new MicroTageMeta
+  // mBTB always-taken bit of `branch` (a taken conditional), for uBTB pair slot B qualification
+  val alwaysTaken: Bool = Bool()
 }
 
 // metadata for commit training (e.g. ras)
