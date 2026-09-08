@@ -49,6 +49,9 @@ case class BpuParameters(
     // Pair fires only when fewer than this many blocks are un-prefetched
     // (prefetch caught up -> downstream hungry). 0 = gate off.
     PairPrefetchHungryDist: Int = 0,
+    // A conditional branch is learned as the pair second branch only while mBTB marks it always-taken (gem5 G6/C6).
+    // When false, a conditional second branch without the bit is still allowed but must reach PairCondConfThreshold.
+    PairSecondCondRequiresAlwaysTaken: Boolean = true,
     // history
     phrParameters:      PhrParameters = PhrParameters(),
     commonHRParameters: CommonHRParameters = CommonHRParameters(),
@@ -75,6 +78,8 @@ trait HasBpuParameters extends HasFrontendParameters {
   def PairCondConfThreshold:   Int = bpuParameters.PairCondConfThreshold
   def PairPrefetchHungryDist:  Int = bpuParameters.PairPrefetchHungryDist
   def PairConfMax:             Int = (1 << PairConfWidth) - 1
+
+  def PairSecondCondRequiresAlwaysTaken: Boolean = bpuParameters.PairSecondCondRequiresAlwaysTaken
 
   // general
   def FetchBlockSizeWidth:    Int = log2Ceil(FetchBlockSize)

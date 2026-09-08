@@ -284,6 +284,8 @@ class BpuFastTrain(implicit p: Parameters) extends BpuBundle {
   val hasOverride:     Bool          = Bool()
   val abtbMeta:        AheadBtbMeta  = new AheadBtbMeta
   val utageMeta:       MicroTageMeta = new MicroTageMeta
+  // finalPrediction is a taken conditional branch that mBTB marks always-taken, for uBTB pair training
+  val alwaysTaken: Bool = Bool()
 }
 
 // metadata for commit training (e.g. ras)

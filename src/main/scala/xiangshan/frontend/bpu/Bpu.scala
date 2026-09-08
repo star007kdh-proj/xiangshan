@@ -181,6 +181,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     b.valid := io.fromFtq.train.bits.branches(i).valid && t0_firstMispredictMask(i)
   }
 
+  // the s3 first taken branch is a conditional branch that mBTB marks always-taken, driven in the s3 section
+  private val s3_firstTakenAlwaysTaken = Wire(Bool())
+
   private val fastTrain = Wire(Valid(new BpuFastTrain))
   fastTrain.valid                := s3_valid
   fastTrain.bits.startPc         := s3_startPc
@@ -188,6 +191,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   fastTrain.bits.abtbMeta        := s3_abtbMeta
   fastTrain.bits.utageMeta       := s3_utageMeta
   fastTrain.bits.hasOverride     := s3_override
+  fastTrain.bits.alwaysTaken     := s3_firstTakenAlwaysTaken
 
   predictors.foreach { p =>
     // TODO: duplicate pc and fire to solve high fan-out issue
@@ -339,10 +343,15 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     if (!EnableTwoTaken || PairPrefetchHungryDist == 0) true.B
     else io.fromFtq.unprefetchedBlockNum.get < PairPrefetchHungryDist.U
 
-  // conditional slot B requires a higher confidence threshold than direct.
-  private val s1_pairConfThreshold = if (EnableTwoTaken)
-    Mux(s1_ubtbPair.bits.second.attribute.isConditional, PairCondConfThreshold.U, PairDirectConfThreshold.U)
-    else 0.U
+  private val s1_pairSecondCond =
+    if (EnableTwoTaken) s1_ubtbPair.bits.second.attribute.isConditional else false.B
+  private val s1_pairSecondAlwaysTaken = if (EnableTwoTaken) s1_ubtbPair.bits.secondAlwaysTaken else false.B
+  // with PairSecondCondRequiresAlwaysTaken, uBTB only keeps an always-taken conditional as the second branch, so
+  // one threshold fits all; otherwise a conditional second branch without the bit needs the higher threshold
+  private val s1_pairConfThreshold =
+    if (!EnableTwoTaken) 0.U
+    else if (PairSecondCondRequiresAlwaysTaken) PairDirectConfThreshold.U
+    else Mux(s1_pairSecondCond && !s1_pairSecondAlwaysTaken, PairCondConfThreshold.U, PairDirectConfThreshold.U)
 
   private val s1_usePair = if (EnableTwoTaken)
     // slot B attribute and first.taken are guaranteed by uBTB pair training (t0_pairEligible), asserted in MicroBtb
@@ -406,6 +415,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_firstTakenBranchOH = s3_compareMatrix.getLeastElementOH(s3_takenMask)
   private val s3_firstTakenBranch   = Mux1H(s3_firstTakenBranchOH, s3_mbtbResult)
   private val s3_useRas             = s3_firstTakenBranch.bits.attribute.isReturn
+  private val s3_alwaysTakenMask    = RegEnable(mbtb.io.alwaysTaken, s2_fire)
+  s3_firstTakenAlwaysTaken :=
+    s3_taken && s3_firstTakenBranch.bits.attribute.isConditional && Mux1H(s3_firstTakenBranchOH, s3_alwaysTakenMask)
   private val s3_useIttage          = s3_firstTakenBranch.bits.attribute.needIttage && ittage.io.prediction.hit
 
   private val s2_fallThroughPrediction = RegEnable(fallThrough.io.prediction, s1_fire)
@@ -783,6 +795,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       io.toFtq.prediction.fire && io.toFtq.prediction.bits.pair.map(_.valid).getOrElse(false.B))
     // slot-A-call pair fires; second-slot meta carries the post-push RAS view.
     XSPerfAccumulate("pairFireCallA", s1_pairFire && s1_ubtbPair.bits.first.attribute.hasPush)
+    // second branch kind at fire: always-taken conditional / other conditional / jump
+    XSPerfAccumulate("pairFireCondAlwaysTaken", s1_pairFire && s1_pairSecondCond && s1_pairSecondAlwaysTaken)
+    XSPerfAccumulate("pairFireCondNotAlwaysTaken", s1_pairFire && s1_pairSecondCond && !s1_pairSecondAlwaysTaken)
+    XSPerfAccumulate("pairFireJump", s1_pairFire && !s1_pairSecondCond)
   }
   XSPerfHistogram(
     "fetchBlockSize",
