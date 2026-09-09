@@ -395,6 +395,27 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     vcModule.io.insert.valid := t1_doInsertVc && t1_evictedMeta.sramValid.get
     vcModule.io.insert.bits.entry := t1_evictedVcEntry
 
+    // Direction training: every resolved conditional branch that matches a VC entry, whether it mispredicted or not.
+    // Entries are matched by the tag of their own align bank; the block-relative half index rebuilds the full position.
+    val t1_posHigherBitsVec = t1_rotator.rotate(VecInit.tabulate(NumAlignBanks)(_.U(AlignBankIdxLen.W)))
+    val t1_vcTagVec = VecInit(t1_startPcVec.map(makeVCTag))
+    val t1_vcAlwaysTakenClearVec = Wire(Vec(VCSize, Bool()))
+    vcModule.io.entries.zip(vcModule.io.directionUpdate).zipWithIndex.foreach { case ((e, port), k) =>
+      val entryAlignBankMask = UIntToOH(e.vcTag(AlignBankIdxLen - 1, 0), NumAlignBanks)
+      val tagMatch = e.valid && e.vcTag === Mux1H(entryAlignBankMask, t1_vcTagVec)
+      val fullPosition = Cat(Mux1H(entryAlignBankMask, t1_posHigherBitsVec), e.position)
+      val hitMask = t1_train.branches.map { branch =>
+        branch.valid && branch.bits.attribute.isConditional && tagMatch && fullPosition === branch.bits.cfiPosition
+      }
+      val actualTaken     = Mux1H(hitMask, t1_train.branches.map(_.bits.taken))
+      val nextAlwaysTaken = e.alwaysTaken && actualTaken
+      port.valid            := t1_fire && hitMask.reduce(_ || _)
+      port.bits.alwaysTaken := nextAlwaysTaken
+      port.bits.counter     := Mux(nextAlwaysTaken, e.counter, e.counter.getUpdate(actualTaken))
+      t1_vcAlwaysTakenClearVec(k) := port.valid && e.alwaysTaken && !nextAlwaysTaken
+    }
+    XSPerfAccumulate("vc_alwaysTaken_clear", Mux(t1_fire, PopCount(t1_vcAlwaysTakenClearVec), 0.U))
+
     // VC performance counters
     XSPerfAccumulate("vc_train_invalidate", t1_doInvalidateVc)
     XSPerfAccumulate("vc_train_update", t1_doUpdateVc)

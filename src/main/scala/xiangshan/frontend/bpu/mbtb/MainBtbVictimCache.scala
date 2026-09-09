@@ -75,6 +75,11 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
     // T1 PLRU training touches for actually-taken VC slots (one per VC result slot)
     val takenTouch: Vec[Valid[UInt]] = Vec(NumVCResultSlots, Flipped(Valid(UInt(VCIdxLen.W))))
 
+    // all entries, so MainBtb can match every resolved conditional branch against the victim cache at T1
+    val entries: Vec[VCEntry] = Output(Vec(VCSize, new VCEntry))
+    // T1 direction training (always-taken bit + counter) per entry, same rule as the SRAM counters
+    val directionUpdate: Vec[Valid[MainBtbDirectionEntry]] = Vec(VCSize, Flipped(Valid(new MainBtbDirectionEntry)))
+
     // Predecode-triggered VC entry invalidation (ghost entry removal)
     val pdInvalidate: Valid[InvalidateReq] = Flipped(Valid(new InvalidateReq))
   }
@@ -83,6 +88,7 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
 
   /* *** storage *** */
   private val entries = RegInit(VecInit(Seq.fill(VCSize)(0.U.asTypeOf(new VCEntry))))
+  io.entries := entries
 
   /* *** replacer *** */
   private val replacer = Module(new MainBtbVCReplacer)
@@ -154,7 +160,13 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
   replacer.io.trainTouch.valid := trainTouchValid
   replacer.io.trainTouch.bits  := trainTouchIdx
 
-  /* *** sequential writes (priority: invalidate > update > insert) *** */
+  /* *** sequential writes, later blocks win: direction < invalidate < update < insert *** */
+  io.directionUpdate.zipWithIndex.foreach { case (d, i) =>
+    when(d.valid) {
+      entries(i).alwaysTaken := d.bits.alwaysTaken
+      entries(i).counter     := d.bits.counter
+    }
+  }
   when(io.invalidate.valid) {
     entries.foreach { e =>
       when(e.valid && e.vcTag === io.invalidate.bits.vcTag &&
@@ -189,5 +201,6 @@ class MainBtbVictimCache(implicit p: Parameters) extends MainBtbModule with Help
   XSPerfAccumulate("vc_replace_invalid", io.insert.valid && !replacer.io.validBits.andR)
   XSPerfAccumulate("vc_replace_plru", io.insert.valid && replacer.io.validBits.andR)
   XSPerfAccumulate("vc_insert_duplicate", io.insert.valid && hasDuplicate)
+  XSPerfAccumulate("vc_direction_update", PopCount(io.directionUpdate.map(_.valid)))
   XSPerfAccumulate("vc_pd_invalidate", io.pdInvalidate.valid)
 }
