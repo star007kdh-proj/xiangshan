@@ -342,9 +342,10 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     t1_vcUpdateEntry.targetLowerBits := getTargetLowerBits(t1_mispredictInfo.bits.target)
     t1_vcUpdateEntry.targetCarry := getTargetCarry(t1_activeStartPc, t1_mispredictInfo.bits.target)
     t1_vcUpdateEntry.attribute := t1_mispredictInfo.bits.attribute
-    // Counter preservation: update if conditional, reset if attribute changed or needIttage
+    // Counter preservation: update if conditional, reset if attribute changed, needIttage or targetWrong
     val t1_vcAttrChanged = !(t1_mispredictInfo.bits.attribute === t1_vcEntry.attribute)
-    val t1_vcNeedReset = t1_vcAttrChanged || t1_mispredictInfo.bits.attribute.needIttage
+    val t1_vcNeedReset =
+      t1_vcAttrChanged || t1_mispredictInfo.bits.attribute.needIttage || t1_mispredictInfo.bits.targetWrong
     t1_vcUpdateEntry.counter := Mux(
       t1_vcNeedReset,
       TakenCounter.WeakPositive,

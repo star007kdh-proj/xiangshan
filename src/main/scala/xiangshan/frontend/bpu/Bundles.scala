@@ -240,6 +240,8 @@ class BranchInfo(implicit p: Parameters) extends BpuBundle with HalfAlignHelper 
   val cfiPosition: UInt            = UInt(CfiPositionWidth.W)
   val attribute:   BranchAttribute = new BranchAttribute
   val mispredict:  Bool            = Bool()
+  // taken direction was right but the target was not (backend BranchUnit/JumpUnit targetWrong)
+  val targetWrong: Bool            = Bool()
 
   val debug_realCfiPc: Option[UInt] = Option.when(!env.FPGAPlatform)(UInt(VAddrBits.W))
 
@@ -249,6 +251,7 @@ class BranchInfo(implicit p: Parameters) extends BpuBundle with HalfAlignHelper 
     this.cfiPosition := getAlignedPosition(resolve.pc, resolve.ftqOffset)._1
     this.attribute   := resolve.attribute
     this.mispredict  := resolve.mispredict
+    this.targetWrong := resolve.targetWrong
 
     if (!env.FPGAPlatform) {
       this.debug_realCfiPc.get := getRealCfiPcFromOffset(

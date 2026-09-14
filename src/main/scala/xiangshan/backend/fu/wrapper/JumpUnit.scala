@@ -72,6 +72,7 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
   io.toFrontendBJUResolve.get.bits.target := PrunedAddrInit(jumpDataModule.io.target)
   io.toFrontendBJUResolve.get.bits.taken := true.B
   io.toFrontendBJUResolve.get.bits.mispredict := needTrain
+  io.toFrontendBJUResolve.get.bits.targetWrong := targetWrong
   io.toFrontendBJUResolve.get.bits.attribute.branchType := MuxCase(
     BranchAttribute.BranchType.None,
     Seq(

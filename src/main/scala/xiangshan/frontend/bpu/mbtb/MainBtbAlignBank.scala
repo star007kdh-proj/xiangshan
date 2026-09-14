@@ -235,7 +235,9 @@ class MainBtbAlignBank(
       //   a. it's an OtherIndirect-type branch (to update target and play the role of Ittage's base table).
       t1_mispredictInfo.bits.attribute.needIttage ||
       //   b. attribute changed, probably indicating a software self-modification.
-      !(t1_mispredictInfo.bits.attribute === Mux1H(t1_hitMask, t1_meta.map(_.attribute)))
+      !(t1_mispredictInfo.bits.attribute === Mux1H(t1_hitMask, t1_meta.map(_.attribute))) ||
+      //   c. the target was wrong (aliased or stale entry), otherwise a hit entry would never be corrected.
+      t1_mispredictInfo.bits.targetWrong
   )
   // VC Path B: suppress SRAM write when MainBtb handles the update in VC instead
   private val t1_entryNeedWrite = t1_entryNeedWriteRaw && !io.vcSuppressWrite.getOrElse(false.B)
@@ -323,7 +325,8 @@ class MainBtbAlignBank(
     Seq(
       ("allocate", t1_entryNeedWrite),
       ("fixTarget", t1_hit && t1_mispredictInfo.bits.attribute.needIttage),
-      ("fixAttribute", t1_hit && !(t1_mispredictInfo.bits.attribute === Mux1H(t1_hitMask, t1_meta.map(_.attribute))))
+      ("fixAttribute", t1_hit && !(t1_mispredictInfo.bits.attribute === Mux1H(t1_hitMask, t1_meta.map(_.attribute)))),
+      ("fixWrongTarget", t1_hit && t1_mispredictInfo.bits.targetWrong)
     )
   )
 

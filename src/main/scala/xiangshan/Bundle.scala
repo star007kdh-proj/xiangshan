@@ -294,6 +294,7 @@ class Resolve(implicit p: Parameters) extends XSBundle {
   val target: PrunedAddr = PrunedAddr(VAddrBits)
   val taken: Bool = Bool()
   val mispredict: Bool = Bool()
+  val targetWrong: Bool = Bool()
   val attribute: BranchAttribute = new BranchAttribute
   val debug_isRVC: Option[Bool] = Option.when(!env.FPGAPlatform)(Bool())
 }

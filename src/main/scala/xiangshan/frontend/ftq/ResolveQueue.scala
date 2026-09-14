@@ -149,6 +149,7 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
       branchSlot.bits.cfiPosition := getAlignedPosition(branch.bits.pc, branch.bits.ftqOffset)._1
       branchSlot.bits.attribute   := branch.bits.attribute
       branchSlot.bits.mispredict  := branch.bits.mispredict
+      branchSlot.bits.targetWrong := branch.bits.targetWrong
       if (branchSlot.bits.debug_realCfiPc.isDefined) {
         branchSlot.bits.debug_realCfiPc.get := getRealCfiPcFromOffset(
           branch.bits.pc,

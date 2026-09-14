@@ -80,6 +80,7 @@ class BranchUnit(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg) {
   io.toFrontendBJUResolve.get.bits.target := PrunedAddrInit(addModule.io.target)
   io.toFrontendBJUResolve.get.bits.taken := dataModule.io.taken
   io.toFrontendBJUResolve.get.bits.mispredict := isMisPred
+  io.toFrontendBJUResolve.get.bits.targetWrong := targetWrong
   io.toFrontendBJUResolve.get.bits.attribute.branchType := BranchAttribute.BranchType.Conditional
   io.toFrontendBJUResolve.get.bits.attribute.rasAction := 0.U
   if (io.toFrontendBJUResolve.get.bits.debug_isRVC.isDefined) {
