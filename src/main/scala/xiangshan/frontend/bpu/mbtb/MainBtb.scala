@@ -395,13 +395,13 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val pdInval_r1_alignBankIdx    = getAlignBankIndex(pdInval_r1_cfiPc)
   private val pdInval_r1_setIdx          = getSetIndex(pdInval_r1_cfiPc)
   private val pdInval_r1_internalBankIdx = getInternalBankIndex(pdInval_r1_cfiPc)
-  private val pdInval_r1_fullPosition    = Cat(
-    getAlignBankIndex(pdInval_r1_cfiPc),
-    getAlignedInstOffset(pdInval_r1_cfiPc)
-  )
-  private val pdInval_r1_activeMeta = pdInval_r1_req.mbtbMeta.entries(pdInval_r1_alignBankIdx)
+  // meta.position's upper bit is the rotator's logical bank order, not VA[5]: compare the aligned offset only
+  private val pdInval_r1_alignedOffset = getAlignedInstOffset(pdInval_r1_cfiPc)
+  private val pdInval_r1_activeMeta    = pdInval_r1_req.mbtbMeta.entries(pdInval_r1_alignBankIdx)
   private val pdInval_r1_wayMask = VecInit(
-    pdInval_r1_activeMeta.map(m => m.rawHit && m.position === pdInval_r1_fullPosition)
+    pdInval_r1_activeMeta.map(m =>
+      m.rawHit && m.position(CfiAlignedPositionWidth - 1, 0) === pdInval_r1_alignedOffset
+    )
   ).asUInt
   private val pdInval_r1_alignBankMask = UIntToOH(pdInval_r1_alignBankIdx, NumAlignBanks)
 
