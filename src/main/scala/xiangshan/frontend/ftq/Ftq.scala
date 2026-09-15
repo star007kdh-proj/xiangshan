@@ -136,6 +136,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
   )
 
   private val redirect = Mux(backendRedirect.valid, backendRedirect, ifuRedirect)
+  // a pair second slot never gets its resolve meta written, so its mBTB meta is stale (same gate as train)
+  private val ifuRedirectIsPairSecond =
+    if (EnableTwoTaken) isPairSecond(ifuRedirect.bits.ftqIdx.value) else false.B
 
   // redirect->prefetch bypass beat: cycle after a redirect, before BPU re-enqueues the target.
   private val redirectNext   = RegNext(redirect)
@@ -460,7 +463,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   // predecode-triggered BTB entry invalidation (NotCfiTaken / InvalidTaken, attribute = None)
   // meta is pre-read with the in-advance ftqIdx to avoid a FtqSize-wide mux on the redirect cycle
-  io.toBpu.pdInvalidate.valid      := ifuRedirect.valid && ifuRedirect.bits.attribute.isNone
+  io.toBpu.pdInvalidate.valid :=
+    ifuRedirect.valid && ifuRedirect.bits.attribute.isNone && !ifuRedirectIsPairSecond
   io.toBpu.pdInvalidate.bits.cfiPc := getCfiPcFromOffset(
     PrunedAddrInit(ifuRedirect.bits.pc),
     ifuRedirect.bits.ftqOffset
