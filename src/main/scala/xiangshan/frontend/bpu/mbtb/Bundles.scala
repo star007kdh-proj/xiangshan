@@ -57,7 +57,11 @@ class MainBtbEntry(implicit p: Parameters) extends MainBtbBundle {
 class MainBtbEntrySramWriteReq(implicit p: Parameters) extends WriteReqBundle with HasMainBtbParameters {
   val setIdx:       UInt         = UInt(SetIdxLen.W)
   val entry:        MainBtbEntry = new MainBtbEntry
-  override def tag: Option[UInt] = Some(Cat(entry.tag, entry.position)) // use entry's tag directly
+  // write buffer identity only, not written to sram: a flush is keyed by its way so it never merges with an
+  // entry or with the flush of another way; a real write keeps flushWayIdx at 0 so same-branch writes still merge
+  val isFlush:      Bool         = Bool()
+  val flushWayIdx:  UInt         = UInt(log2Ceil(NumWay).W)
+  override def tag: Option[UInt] = Some(Cat(isFlush, flushWayIdx, entry.tag, entry.position))
 }
 
 class MainBtbCounterSramWriteReq(implicit p: Parameters) extends MainBtbBundle {
