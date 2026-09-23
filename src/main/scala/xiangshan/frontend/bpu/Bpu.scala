@@ -314,13 +314,25 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s1_abtbValidEffective = Wire(Bool())
 
   // S1-predictor / pair-first agreement: same position + target + attribute.
-  // TODO(timing): this compare feeds s1_usePair -> s0_startPc / FTQ payload.
+  // Compare every aBTB entry with the pair first from registers, then select one bit with the first-taken OH.
+  // Mux1H over an all-zero OH yields false, which covers the former s1_abtbResult.taken term.
+  require(NumAheadBtbPredictionEntries > 1, "abtbUbtbAgree relies on Mux1H returning 0 for an all-zero OH")
+  private val s1_abtbPairAgreeVec = VecInit(s1_abtbPrediction.map { pred =>
+    pred.bits.cfiPosition === s1_ubtbPair.bits.first.cfiPosition &&
+      pred.bits.target === s1_ubtbPair.bits.first.target &&
+      pred.bits.attribute === s1_ubtbPair.bits.first.attribute
+  })
   private val abtbUbtbAgree = if (EnableTwoTaken)
+    s1_abtbValidEffective && Mux1H(s1_abtbFirstTakenBrOH, s1_abtbPairAgreeVec)
+    else false.B
+  // tripwire: the selected-entry formula must give the same answer
+  private val debug_abtbUbtbAgreeRef = if (EnableTwoTaken)
     s1_abtbValidEffective && s1_abtbResult.taken &&
       (s1_abtbResult.cfiPosition === s1_ubtbPair.bits.first.cfiPosition) &&
-      (s1_abtbResult.target      === s1_ubtbPair.bits.first.target) &&
-      (s1_abtbResult.attribute   === s1_ubtbPair.bits.first.attribute)
+      (s1_abtbResult.target === s1_ubtbPair.bits.first.target) &&
+      (s1_abtbResult.attribute === s1_ubtbPair.bits.first.attribute)
     else false.B
+  XSError(s1_fire && abtbUbtbAgree =/= debug_abtbUbtbAgreeRef, "abtbUbtbAgree fast path mismatch\n")
 
   // fetch-hungry gate: fire only when prefetch has caught up. Off when dist == 0.
   private val s1_pairFetchHungry =
