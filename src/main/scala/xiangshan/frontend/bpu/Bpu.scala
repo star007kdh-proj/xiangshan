@@ -333,19 +333,14 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     else 0.U
 
   private val s1_usePair = if (EnableTwoTaken)
+    // slot B attribute and first.taken are guaranteed by uBTB pair training (t0_pairEligible), asserted in MicroBtb
     (!s1_abtbValidEffective || abtbUbtbAgree) &&
-      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
+      s1_ubtbPair.valid &&
       s1_pairFetchHungry &&
       // confidence emit gate (attribute-dependent threshold)
       (s1_ubtbPair.bits.confidence >= s1_pairConfThreshold) &&
-      s1_ubtbPair.bits.first.taken &&
-      // slot A: cond / direct-jmp / direct-call; reject return + indirect
-      !s1_ubtbPair.bits.first.attribute.hasPop &&
-      !s1_ubtbPair.bits.first.attribute.isIndirect &&
-      // slot B: direct-jmp / conditional; reject call + return + indirect
-      (s1_ubtbPair.bits.second.attribute.isDirect || s1_ubtbPair.bits.second.attribute.isConditional) &&
-      !s1_ubtbPair.bits.second.attribute.hasPush &&
-      !s1_ubtbPair.bits.second.attribute.hasPop
+      // slot A: reject indirect; a return is indirect with pop, so this also covers hasPop
+      !s1_ubtbPair.bits.first.attribute.isIndirect
     else false.B
 
   s1_prediction := Mux(
@@ -760,12 +755,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     XSPerfAccumulate("pairFireWhileS1PredInvalid", s1_pairFire && !s1_abtbValid)
     XSPerfAccumulate("pairFireWhileS1PredAgrees",  s1_pairFire && abtbUbtbAgree)
     XSPerfAccumulate("pairBlockedByS1Pred",
-      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && s1_abtbValidEffective && !abtbUbtbAgree)
+      s1_ubtbPair.valid && s1_abtbValidEffective && !abtbUbtbAgree)
     XSPerfAccumulate("pairBlockedByConf",
-      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair &&
+      s1_ubtbPair.valid &&
         (s1_ubtbPair.bits.confidence < s1_pairConfThreshold))
     XSPerfAccumulate("pairBlockedByFetchNotHungry",
-      s1_ubtbPair.valid && s1_ubtbPair.bits.isPair && !s1_pairFetchHungry)
+      s1_ubtbPair.valid && !s1_pairFetchHungry)
     XSPerfAccumulate("pairBlockedByS3Override",
       s1_usePair && s3_override && io.toFtq.prediction.fire)
     XSPerfAccumulate("s1PredSuppressedByPair", s1_lastPairFire && s1_abtbValid)

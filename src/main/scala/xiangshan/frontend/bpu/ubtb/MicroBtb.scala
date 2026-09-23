@@ -18,6 +18,7 @@ package xiangshan.frontend.bpu.ubtb
 import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
+import utility.XSError
 import utility.XSPerfAccumulate
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BasePredictor
@@ -129,6 +130,16 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
       s1_hitEntry.slot2.targetCarry
     )
     io.pairPrediction.get := pairOut
+
+    // training invariant relied on by Bpu.s1_usePair: slot2 only holds a taken direct/conditional, non-call branch
+    XSError(
+      s1_fire && pairOut.valid && !(
+        pairOut.bits.first.taken &&
+          (pairOut.bits.second.attribute.isDirect || pairOut.bits.second.attribute.isConditional) &&
+          !pairOut.bits.second.attribute.hasPush
+      ),
+      "uBTB pair slot2 violates the train gate\n"
+    )
 
     XSPerfAccumulate("pairKillCfiOutOfRange", s1_fire && s1_hit && s1_isPair && s1_secondCfiOutOfRange)
   }
